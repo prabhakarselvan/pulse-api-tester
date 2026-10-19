@@ -1,0 +1,173 @@
+@import "tailwindcss";
+
+/* Class-based dark mode (toggled on <html>). */
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  color-scheme: light dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+}
+
+code,
+pre,
+.font-mono,
+.cm-editor {
+  font-family: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, Consolas,
+    monospace;
+}
+
+/* Thin, unobtrusive scrollbars. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(130, 130, 150, 0.35);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(130, 130, 150, 0.55);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* macOS title-bar dragging is handled by Tauri's `data-tauri-drag-region`
+   attribute. We intentionally do NOT use `-webkit-app-region: drag` here: in
+   WKWebView it can swallow click events on buttons placed in the title bar.
+   These classes are kept as harmless no-ops so existing markup still resolves. */
+.drag-region {
+}
+.no-drag {
+}
+
+/* CodeMirror: fill the container and blend with our panels. */
+.cm-editor {
+  height: 100%;
+  font-size: 12.5px;
+}
+.cm-editor,
+.cm-editor .cm-gutters {
+  background: transparent !important;
+}
+.cm-editor .cm-scroller {
+  font-family: inherit;
+  line-height: 1.6;
+}
+.cm-focused {
+  outline: none !important;
+}
+
+/* Gentle entrance for results. */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.fade-in {
+  animation: fadeIn 0.18s ease;
+}
+
+/* Indeterminate progress sweep used while a request is in flight. */
+@keyframes sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(400%);
+  }
+}
+.sweep {
+  animation: sweep 1s ease-in-out infinite;
+}
+
+/* --- Request Flow visualizer animations --- */
+/* A phase beam filling left→right as data transfers. */
+@keyframes flowGrow {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+.flow-grow {
+  transform-origin: left center;
+  animation-name: flowGrow;
+  animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  animation-fill-mode: both;
+}
+.flow-grow-right {
+  transform-origin: right center;
+}
+/* A travelling shimmer that reads as "data moving". */
+@keyframes flowShimmer {
+  from {
+    background-position: -140% 0;
+  }
+  to {
+    background-position: 240% 0;
+  }
+}
+.flow-shimmer {
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.55) 50%,
+    transparent 100%
+  );
+  background-size: 40% 100%;
+  background-repeat: no-repeat;
+  animation: flowShimmer 1.1s linear infinite;
+}
+/* "Waiting" emphasis — a slow pulse while the server thinks. */
+@keyframes waitPulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+.wait-pulse {
+  animation-name: waitPulse;
+  animation-timing-function: ease-in-out;
+  animation-fill-mode: both;
+}
+/* The packet dot travelling across the connection wire. */
+@keyframes dotTravel {
+  from {
+    left: 0%;
+  }
+  to {
+    left: 100%;
+  }
+}
+.dot-travel {
+  animation-name: dotTravel;
+  animation-timing-function: ease-in-out;
+  animation-fill-mode: both;
+}
