@@ -1,7 +1,7 @@
 //! Tauri commands — the `invoke` surface the React frontend calls.
 
 use crate::model::{
-    now_millis, Collection, HistoryEntry, HttpRequest, HttpResponse, SavedEnvironment,
+    now_millis, Auth, Body, Collection, HistoryEntry, HttpRequest, HttpResponse, SavedEnvironment,
     SavedRequest,
 };
 use crate::net;
@@ -188,6 +188,33 @@ pub fn read_text_file(path: String) -> Result<String, String> {
     std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))
 }
 
+/// Look up geo/ASN info for an IP via ipwho.is (reuses the instrumented client).
+#[tauri::command]
+pub async fn geo_lookup(ip: String) -> Result<String, String> {
+    if ip.trim().is_empty() {
+        return Err("no ip".to_string());
+    }
+    let req = HttpRequest {
+        method: "GET".into(),
+        url: format!("https://ipwho.is/{ip}"),
+        query_params: vec![],
+        headers: vec![],
+        body: Body::default(),
+        auth: Auth::default(),
+        follow_redirects: true,
+        timeout_ms: 8_000,
+        verify_tls: true,
+        pre_request_script: String::new(),
+        post_response_script: String::new(),
+        reuse_connection: false,
+        proxy_url: String::new(),
+        client_cert_pem: String::new(),
+        client_key_pem: String::new(),
+    };
+    let res = net::execute(req).await?;
+    Ok(res.body)
+}
+
 // --- {{variable}} substitution ---------------------------------------------
 
 /// Replace every `{{key}}` occurrence in `s` with its value.
@@ -230,6 +257,7 @@ fn substitute_request(req: &HttpRequest, vars: &HashMap<String, String>) -> Http
     r.auth.password = apply_vars(&r.auth.password, vars);
     r.auth.api_key_name = apply_vars(&r.auth.api_key_name, vars);
     r.auth.api_key_value = apply_vars(&r.auth.api_key_value, vars);
+    r.proxy_url = apply_vars(&r.proxy_url, vars);
     r
 }
 
@@ -260,6 +288,10 @@ mod tests {
             verify_tls: true,
             pre_request_script: String::new(),
             post_response_script: String::new(),
+            reuse_connection: false,
+            proxy_url: String::new(),
+            client_cert_pem: String::new(),
+            client_key_pem: String::new(),
         };
 
         let out = substitute_request(&req, &vars);

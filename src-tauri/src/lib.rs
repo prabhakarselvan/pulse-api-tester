@@ -47,6 +47,12 @@ pub fn run() {
             commands::save_collection,
             commands::delete_collection,
             commands::read_text_file,
+            commands::geo_lookup,
+            net::realtime::ws_connect,
+            net::realtime::ws_send,
+            net::realtime::ws_close,
+            net::realtime::sse_connect,
+            net::realtime::sse_close,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Pulse");

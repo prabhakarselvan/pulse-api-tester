@@ -4,6 +4,7 @@ import { TitleBar } from "./components/TitleBar";
 import { Sidebar } from "./components/Sidebar";
 import { RequestPanel } from "./components/RequestPanel";
 import { ResponsePanel } from "./components/ResponsePanel";
+import { RealtimePanel } from "./components/RealtimePanel";
 import { TabBar } from "./components/TabBar";
 import { cx } from "./components/ui";
 
@@ -22,6 +23,7 @@ export default function App() {
   const theme = useStore((s) => s.theme);
   const layout = useStore((s) => s.layout);
   const init = useStore((s) => s.init);
+  const requestMode = useStore((s) => s.requestMode);
 
   const [sidebarW, setSidebarW] = useState(() => lsNum("pulse.sidebarW", 256));
   const [split, setSplit] = useState(() => lsNum("pulse.split", 44));
@@ -45,7 +47,13 @@ export default function App() {
       const s = useStore.getState();
       if (e.key === "Enter") {
         e.preventDefault();
-        s.send();
+        if (s.requestMode === "http") {
+          s.send();
+        } else {
+          const live = s.rt.status === "open" || s.rt.status === "connecting";
+          if (live) s.rtDisconnect();
+          else s.rtConnect();
+        }
         return;
       }
       const k = e.key.toLowerCase();
@@ -149,7 +157,7 @@ export default function App() {
             )}
           />
           <div className="min-h-0 min-w-0 flex-1">
-            <ResponsePanel />
+            {requestMode === "http" ? <ResponsePanel /> : <RealtimePanel />}
           </div>
           </div>
         </div>

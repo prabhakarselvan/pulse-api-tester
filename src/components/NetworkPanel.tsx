@@ -1,8 +1,47 @@
-import { useState } from "react";
-import { ChevronDown, ChevronRight, ShieldCheck } from "lucide-react";
+import { useEffect, useState } from "react";
+import { ChevronDown, ChevronRight, MapPin, ShieldCheck } from "lucide-react";
 import type { CertInfo, HttpResponse } from "../lib/types";
 import { formatBytes, formatMs, methodColor, statusColor } from "../lib/format";
+import { geoLookup } from "../lib/api";
 import { InfoTip, cx } from "./ui";
+
+interface Geo {
+  success?: boolean;
+  failed?: boolean;
+  city?: string;
+  region?: string;
+  country?: string;
+  latitude?: number;
+  longitude?: number;
+  flag?: { emoji?: string };
+  connection?: { asn?: number; org?: string; isp?: string };
+}
+
+function useGeo(ip: string | null): Geo | null {
+  const [geo, setGeo] = useState<Geo | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setGeo(null);
+    if (!ip) return;
+    geoLookup(ip)
+      .then((txt) => {
+        if (cancelled) return;
+        try {
+          const j = JSON.parse(txt);
+          setGeo(j && j.success !== false ? j : { failed: true });
+        } catch {
+          setGeo({ failed: true });
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setGeo({ failed: true });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [ip]);
+  return geo;
+}
 
 const PHASE_TIPS = {
   dns: "DNS lookup — translating the hostname into an IP address using your system's configured resolver.",
@@ -15,6 +54,7 @@ const PHASE_TIPS = {
 export function NetworkPanel({ res }: { res: HttpResponse }) {
   const t = res.timings;
   const n = res.network;
+  const geo = useGeo(n.dns.usedAddress ?? null);
 
   const phases = [
     { key: "dns", label: "DNS", ms: t.dnsMs, color: "bg-indigo-500", tip: PHASE_TIPS.dns },
@@ -24,11 +64,31 @@ export function NetworkPanel({ res }: { res: HttpResponse }) {
     { key: "download", label: "Download", ms: t.downloadMs, color: "bg-emerald-500", tip: PHASE_TIPS.download },
   ];
   const sum = phases.reduce((a, p) => a + Math.max(0, p.ms), 0) || 1;
+  // A fresh connection always spends real time on TCP connect; exactly 0 ms TCP
+  // alongside a real response means this request reused a keep-alive connection.
+  const reused = t.tcpMs === 0 && t.dnsMs === 0 && t.ttfbMs > 0;
 
   return (
     <div className="h-full space-y-4 overflow-auto p-4">
       {/* Timing waterfall */}
-      <Section title="Timing" right={<span className="font-mono text-xs text-slate-500 dark:text-slate-400">total {formatMs(t.totalMs)}</span>}>
+      <Section
+        title="Timing"
+        right={
+          <span className="flex items-center gap-2">
+            {reused && (
+              <span
+                className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-500"
+                title="Connection reused via keep-alive — no DNS, TCP or TLS this time."
+              >
+                keep-alive · reused
+              </span>
+            )}
+            <span className="font-mono text-xs text-slate-500 dark:text-slate-400">
+              total {formatMs(t.totalMs)}
+            </span>
+          </span>
+        }
+      >
         <div className="flex h-7 w-full overflow-hidden rounded-lg bg-slate-100 dark:bg-white/[0.04]">
           {phases
             .filter((p) => p.ms > 0)
@@ -118,6 +178,37 @@ export function NetworkPanel({ res }: { res: HttpResponse }) {
         <Row label="Request size" value={formatBytes(n.requestSizeBytes)} />
         <Row label="Response size" value={`${formatBytes(n.responseSizeBytes)} on wire · ${formatBytes(res.bodySizeBytes)} decoded`} />
       </Section>
+
+      {/* Server location (geo / ASN) */}
+      {geo && !geo.failed && (
+        <Section
+          title="Server location"
+          right={
+            <span className="inline-flex items-center gap-1 text-xs text-slate-400">
+              <MapPin size={13} /> {geo.flag?.emoji ?? ""}
+            </span>
+          }
+        >
+          <Row
+            label="Location"
+            tip="Approximate geographic location of the server IP, from an IP geolocation database (ipwho.is)."
+            value={
+              [geo.city, geo.region, geo.country].filter(Boolean).join(", ") || "—"
+            }
+          />
+          {geo.connection?.asn != null && (
+            <Row
+              label="Network (ASN)"
+              tip="Autonomous System Number — the network that announces this IP, typically the hosting provider or ISP."
+              value={`AS${geo.connection.asn}${geo.connection.org ? ` · ${geo.connection.org}` : ""}`}
+            />
+          )}
+          {geo.connection?.isp && <Row label="ISP" value={geo.connection.isp} />}
+          {geo.latitude != null && geo.longitude != null && (
+            <Row label="Coordinates" value={`${geo.latitude}, ${geo.longitude}`} />
+          )}
+        </Section>
+      )}
 
       {/* TLS */}
       {n.tls && (

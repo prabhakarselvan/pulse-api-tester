@@ -13,9 +13,13 @@ use http::{Method, Version};
 use http_body_util::{BodyExt, Full};
 use hyper::Request;
 use hyper_util::rt::{TokioExecutor, TokioIo};
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::Mutex;
 use url::Url;
 
 const MAX_REDIRECTS: usize = 10;
@@ -48,6 +52,8 @@ struct SingleResult {
     location: Option<String>,
     timings: Timings,
     network: NetworkInfo,
+    raw_request: String,
+    raw_response_head: String,
 }
 
 async fn execute_inner(req: HttpRequest) -> anyhow::Result<HttpResponse> {
@@ -162,6 +168,8 @@ async fn execute_inner(req: HttpRequest) -> anyhow::Result<HttpResponse> {
             network: single.network,
             final_url: url.to_string(),
             body_size_bytes,
+            raw_request: single.raw_request,
+            raw_response_head: single.raw_response_head,
         });
     }
 }
@@ -186,6 +194,55 @@ async fn perform_single(
         .port_or_known_default()
         .ok_or_else(|| anyhow!("cannot determine port"))?;
     let timeout = Duration::from_millis(req.timeout_ms.max(1));
+    let proxy = req.proxy_url.trim().to_string();
+    let want_reuse = req.reuse_connection;
+
+    let request_size_bytes = estimate_request_size(url, method, headers, body.len());
+    let req_body = body.clone();
+
+    // --- Fast path: reuse a live, pooled keep-alive connection -------------
+    if want_reuse {
+        let key = pool_key(&scheme, &host, port, req);
+        if let Some(mut pooled) = pool_take(&key).await {
+            // Probe liveness first; only commit to the pooled socket if it is
+            // ready (so a server-closed idle connection falls through to a
+            // fresh connect WITHOUT risking a double-send).
+            if ready_sender(&mut pooled.sender).await {
+                let use_h2 = pooled.sender.is_h2();
+                let hyper_req = build_hyper_request(url, method, headers, body.clone(), use_h2)?;
+                let (parts, resp_body, ttfb, dl) =
+                    send_on_sender(&mut pooled.sender, hyper_req).await?;
+                let http_version = pooled.connection.http_version.clone();
+                let raw_request = build_raw_request(url, method, headers, &req_body, &http_version);
+                let raw_response_head = build_raw_response_head(&http_version, &parts);
+                let mut dns = pooled.dns.clone();
+                dns.lookup_ms = 0.0; // reused: no DNS/TCP/TLS this time
+                let timings = Timings {
+                    dns_ms: 0.0,
+                    tcp_ms: 0.0,
+                    tls_ms: 0.0,
+                    ttfb_ms: ttfb,
+                    download_ms: dl,
+                    total_ms: 0.0,
+                };
+                let result = finalize_single(
+                    parts,
+                    resp_body,
+                    timings,
+                    dns,
+                    pooled.tls_info.clone(),
+                    pooled.connection.clone(),
+                    request_size_bytes,
+                    scheme.clone(),
+                    raw_request,
+                    raw_response_head,
+                );
+                pool_put(key, pooled).await;
+                return Ok(result);
+            }
+            // Not ready → stale connection; drop it and connect fresh below.
+        }
+    }
 
     // --- DNS ---------------------------------------------------------------
     let mut dns_result = dns::resolve(&host).await.context("DNS resolution failed")?;
@@ -198,36 +255,115 @@ async fn perform_single(
         bail!("no IP addresses found for host {host}");
     }
 
-    // --- TCP ---------------------------------------------------------------
+    // --- TCP (direct, or through an HTTP proxy CONNECT tunnel) -------------
     let tcp_start = Instant::now();
-    let (tcp, used_ip) = connect_any(&dns_result.addresses, port, timeout).await?;
+    let (tcp, used_label) = if proxy.is_empty() {
+        let (tcp, used_ip) = connect_any(&dns_result.addresses, port, timeout).await?;
+        (tcp, used_ip.to_string())
+    } else {
+        let (tcp, proxy_label) = proxy_connect(&proxy, &host, port, timeout).await?;
+        (tcp, format!("{proxy_label} (proxy)"))
+    };
     let tcp_ms = ms(tcp_start.elapsed());
     let _ = tcp.set_nodelay(true);
-    dns_result.info.used_address = Some(used_ip.to_string());
+    dns_result.info.used_address = Some(used_label);
     let local_addr = tcp.local_addr().ok().map(|a| a.to_string());
     let remote_addr = tcp.peer_addr().ok().map(|a| a.to_string());
 
-    let request_size_bytes = estimate_request_size(url, method, headers, body.len());
-
-    // --- TLS + HTTP --------------------------------------------------------
-    let (parts, resp_body, ttfb_ms, download_ms, tls_info, tls_ms, http_version) = if is_tls {
+    // --- TLS + HTTP handshake ----------------------------------------------
+    let (parts, resp_body, ttfb_ms, download_ms, tls_info, tls_ms, http_version, sender) = if is_tls
+    {
         let tls_start = Instant::now();
-        let (tls_stream, tls_info, is_h2) = tls::handshake(tcp, &host, req.verify_tls)
-            .await
-            .context("TLS handshake failed")?;
+        let (tls_stream, tls_info, is_h2) = tls::handshake(
+            tcp,
+            &host,
+            req.verify_tls,
+            &req.client_cert_pem,
+            &req.client_key_pem,
+        )
+        .await
+        .context("TLS handshake failed")?;
         let tls_ms = ms(tls_start.elapsed());
-        let hyper_req = build_hyper_request(url, method, headers, body, is_h2)?;
-        let (parts, bytes, ttfb, dl) = drive_http(TokioIo::new(tls_stream), hyper_req, is_h2).await?;
+        let mut sender = establish(TokioIo::new(tls_stream), is_h2)
+            .await
+            .context("HTTP handshake failed")?;
+        let hyper_req = build_hyper_request(url, method, headers, body.clone(), is_h2)?;
+        let (parts, bytes, ttfb, dl) = send_on_sender(&mut sender, hyper_req).await?;
         let ver = http_version_string(is_h2, &parts.version);
-        (parts, bytes, ttfb, dl, Some(tls_info), tls_ms, ver)
+        (parts, bytes, ttfb, dl, Some(tls_info), tls_ms, ver, sender)
     } else {
-        let hyper_req = build_hyper_request(url, method, headers, body, false)?;
-        let (parts, bytes, ttfb, dl) = drive_http(TokioIo::new(tcp), hyper_req, false).await?;
+        let mut sender = establish(TokioIo::new(tcp), false)
+            .await
+            .context("HTTP handshake failed")?;
+        let hyper_req = build_hyper_request(url, method, headers, body.clone(), false)?;
+        let (parts, bytes, ttfb, dl) = send_on_sender(&mut sender, hyper_req).await?;
         let ver = http_version_string(false, &parts.version);
-        (parts, bytes, ttfb, dl, None, 0.0, ver)
+        (parts, bytes, ttfb, dl, None, 0.0, ver, sender)
     };
 
-    // --- Parse response headers -------------------------------------------
+    // --- Raw wire reconstruction ------------------------------------------
+    let raw_request = build_raw_request(url, method, headers, &req_body, &http_version);
+    let raw_response_head = build_raw_response_head(&http_version, &parts);
+
+    let connection = Connection {
+        local_addr,
+        remote_addr,
+        http_version: http_version.clone(),
+    };
+    let timings = Timings {
+        dns_ms,
+        tcp_ms,
+        tls_ms,
+        ttfb_ms,
+        download_ms,
+        total_ms: 0.0,
+    };
+    let dns_info = dns_result.info;
+
+    // Return the fresh connection to the pool for subsequent keep-alive reuse.
+    if want_reuse {
+        let key = pool_key(&scheme, &host, port, req);
+        pool_put(
+            key,
+            Pooled {
+                sender,
+                tls_info: tls_info.clone(),
+                connection: connection.clone(),
+                dns: dns_info.clone(),
+            },
+        )
+        .await;
+    }
+
+    Ok(finalize_single(
+        parts,
+        resp_body,
+        timings,
+        dns_info,
+        tls_info,
+        connection,
+        request_size_bytes,
+        scheme,
+        raw_request,
+        raw_response_head,
+    ))
+}
+
+/// Parse `parts` + body into a `SingleResult`, shared by the fresh and the
+/// pooled-reuse code paths.
+#[allow(clippy::too_many_arguments)]
+fn finalize_single(
+    parts: http::response::Parts,
+    resp_body: Bytes,
+    timings: Timings,
+    dns: DnsInfo,
+    tls_info: Option<TlsInfo>,
+    connection: Connection,
+    request_size_bytes: u64,
+    scheme: String,
+    raw_request: String,
+    raw_response_head: String,
+) -> SingleResult {
     let mut resp_headers = Vec::new();
     let mut content_type = None;
     let mut content_encoding = None;
@@ -253,22 +389,10 @@ async fn perform_single(
     }
 
     let response_size_bytes = resp_body.len() as u64;
-    let timings = Timings {
-        dns_ms,
-        tcp_ms,
-        tls_ms,
-        ttfb_ms,
-        download_ms,
-        total_ms: 0.0,
-    };
     let network = NetworkInfo {
-        dns: dns_result.info,
+        dns,
         tls: tls_info,
-        connection: Connection {
-            local_addr,
-            remote_addr,
-            http_version,
-        },
+        connection,
         redirects: Vec::new(),
         hops: Vec::new(),
         request_size_bytes,
@@ -276,13 +400,9 @@ async fn perform_single(
         scheme,
     };
 
-    Ok(SingleResult {
+    SingleResult {
         status: parts.status.as_u16(),
-        status_text: parts
-            .status
-            .canonical_reason()
-            .unwrap_or("")
-            .to_string(),
+        status_text: parts.status.canonical_reason().unwrap_or("").to_string(),
         headers: resp_headers,
         raw_body: resp_body,
         content_encoding,
@@ -290,49 +410,283 @@ async fn perform_single(
         location,
         timings,
         network,
-    })
+        raw_request,
+        raw_response_head,
+    }
 }
 
-/// Drive the HTTP exchange over an already-connected (and possibly TLS-wrapped)
-/// IO, returning response parts, body bytes, TTFB and download time.
-async fn drive_http<IO>(
-    io: IO,
-    req: Request<Full<Bytes>>,
-    use_h2: bool,
-) -> anyhow::Result<(http::response::Parts, Bytes, f64, f64)>
+/// Reconstruct a human-readable raw HTTP request (request line + headers + body).
+fn build_raw_request(
+    url: &Url,
+    method: &str,
+    headers: &[(String, String)],
+    body: &Bytes,
+    ver: &str,
+) -> String {
+    let host = url.host_str().unwrap_or("");
+    let authority = match url.port() {
+        Some(p) => format!("{host}:{p}"),
+        None => host.to_string(),
+    };
+    let mut path = url.path().to_string();
+    if let Some(q) = url.query() {
+        path.push('?');
+        path.push_str(q);
+    }
+    if path.is_empty() {
+        path.push('/');
+    }
+    let mut s = format!("{method} {path} {ver}\r\n");
+    s.push_str(&format!("Host: {authority}\r\n"));
+    for (k, v) in headers {
+        if k.eq_ignore_ascii_case("host") {
+            continue;
+        }
+        s.push_str(k);
+        s.push_str(": ");
+        s.push_str(v);
+        s.push_str("\r\n");
+    }
+    if !body.is_empty()
+        && !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+    {
+        s.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    s.push_str("\r\n");
+    match std::str::from_utf8(body) {
+        Ok(t) => s.push_str(t),
+        Err(_) => s.push_str(&format!("<{} bytes of binary data>", body.len())),
+    }
+    s
+}
+
+/// Reconstruct the raw HTTP response head (status line + headers).
+fn build_raw_response_head(ver: &str, parts: &http::response::Parts) -> String {
+    let reason = parts.status.canonical_reason().unwrap_or("");
+    let mut s = format!("{ver} {} {reason}\r\n", parts.status.as_u16());
+    for (name, value) in parts.headers.iter() {
+        s.push_str(name.as_str());
+        s.push_str(": ");
+        s.push_str(&String::from_utf8_lossy(value.as_bytes()));
+        s.push_str("\r\n");
+    }
+    s
+}
+
+// ---------------------------------------------------------------------------
+// Connection senders + keep-alive pool
+// ---------------------------------------------------------------------------
+
+/// An HTTP request sender over an established connection (HTTP/1.1 or HTTP/2).
+enum PooledSender {
+    H1(hyper::client::conn::http1::SendRequest<Full<Bytes>>),
+    H2(hyper::client::conn::http2::SendRequest<Full<Bytes>>),
+}
+
+impl PooledSender {
+    fn is_h2(&self) -> bool {
+        matches!(self, PooledSender::H2(_))
+    }
+}
+
+/// A pooled, idle keep-alive connection plus the network detail we captured when
+/// it was first opened (so reused requests can still report TLS / addressing).
+struct Pooled {
+    sender: PooledSender,
+    tls_info: Option<TlsInfo>,
+    connection: Connection,
+    dns: DnsInfo,
+}
+
+/// Global keep-alive connection pool, keyed by origin + TLS/proxy/cert identity.
+static POOL: OnceLock<Mutex<HashMap<String, Pooled>>> = OnceLock::new();
+
+fn pool() -> &'static Mutex<HashMap<String, Pooled>> {
+    POOL.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+async fn pool_take(key: &str) -> Option<Pooled> {
+    pool().lock().await.remove(key)
+}
+
+async fn pool_put(key: String, p: Pooled) {
+    pool().lock().await.insert(key, p);
+}
+
+/// Pool key: same origin + verify flag + proxy + client-cert identity may share
+/// a connection; anything differing must not.
+fn pool_key(scheme: &str, host: &str, port: u16, req: &HttpRequest) -> String {
+    let cert_tag = if req.client_cert_pem.trim().is_empty() {
+        0
+    } else {
+        cheap_hash(&req.client_cert_pem)
+    };
+    format!(
+        "{scheme}://{host}:{port}|v={}|p={}|c={cert_tag}",
+        req.verify_tls,
+        req.proxy_url.trim()
+    )
+}
+
+/// FNV-1a — a cheap, dependency-free hash to tag a client certificate identity.
+fn cheap_hash(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// Is the pooled sender ready to accept a new request (connection still alive)?
+async fn ready_sender(sender: &mut PooledSender) -> bool {
+    match sender {
+        PooledSender::H1(s) => s.ready().await.is_ok(),
+        PooledSender::H2(s) => s.ready().await.is_ok(),
+    }
+}
+
+/// Perform the HTTP handshake over an already-connected (and possibly
+/// TLS-wrapped) IO, returning a reusable request sender. The connection task is
+/// spawned and kept alive as long as the sender is held (enabling keep-alive).
+async fn establish<IO>(io: IO, use_h2: bool) -> anyhow::Result<PooledSender>
 where
     IO: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
     if use_h2 {
-        let (mut sender, conn) =
+        let (sender, conn) =
             hyper::client::conn::http2::handshake(TokioExecutor::new(), io).await?;
         tokio::spawn(async move {
             let _ = conn.await;
         });
-        sender.ready().await?;
-        let send_start = Instant::now();
-        let resp = sender.send_request(req).await?;
-        let ttfb = ms(send_start.elapsed());
-        let (parts, body) = resp.into_parts();
-        let dl_start = Instant::now();
-        let bytes = collect_body(body).await?;
-        let dl = ms(dl_start.elapsed());
-        Ok((parts, bytes, ttfb, dl))
+        Ok(PooledSender::H2(sender))
     } else {
-        let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
+        let (sender, conn) = hyper::client::conn::http1::handshake(io).await?;
         tokio::spawn(async move {
             let _ = conn.await;
         });
-        sender.ready().await?;
-        let send_start = Instant::now();
-        let resp = sender.send_request(req).await?;
-        let ttfb = ms(send_start.elapsed());
-        let (parts, body) = resp.into_parts();
-        let dl_start = Instant::now();
-        let bytes = collect_body(body).await?;
-        let dl = ms(dl_start.elapsed());
-        Ok((parts, bytes, ttfb, dl))
+        Ok(PooledSender::H1(sender))
     }
+}
+
+/// Send one request on a sender and read the full response, timing TTFB and
+/// download separately.
+async fn send_on_sender(
+    sender: &mut PooledSender,
+    req: Request<Full<Bytes>>,
+) -> anyhow::Result<(http::response::Parts, Bytes, f64, f64)> {
+    match sender {
+        PooledSender::H1(s) => s.ready().await?,
+        PooledSender::H2(s) => s.ready().await?,
+    }
+    let send_start = Instant::now();
+    let resp = match sender {
+        PooledSender::H1(s) => s.send_request(req).await?,
+        PooledSender::H2(s) => s.send_request(req).await?,
+    };
+    let ttfb = ms(send_start.elapsed());
+    let (parts, body) = resp.into_parts();
+    let dl_start = Instant::now();
+    let bytes = collect_body(body).await?;
+    let dl = ms(dl_start.elapsed());
+    Ok((parts, bytes, ttfb, dl))
+}
+
+// ---------------------------------------------------------------------------
+// HTTP proxy (CONNECT tunnelling)
+// ---------------------------------------------------------------------------
+
+/// Open a TCP connection to an HTTP proxy and establish a `CONNECT` tunnel to
+/// `host:port`. Returns the tunneled stream and a "proxyhost:proxyport" label.
+/// (SOCKS is not supported; the one SOCKS crate is blocked by the corporate
+/// proxy mirror.) Both HTTP and HTTPS targets are tunnelled via CONNECT.
+pub(crate) async fn proxy_connect(
+    proxy: &str,
+    host: &str,
+    port: u16,
+    timeout: Duration,
+) -> anyhow::Result<(TcpStream, String)> {
+    let (phost, pport, pcreds) = parse_proxy(proxy)?;
+    let mut stream =
+        tokio::time::timeout(timeout, TcpStream::connect((phost.as_str(), pport)))
+            .await
+            .map_err(|_| anyhow!("proxy connect to {phost}:{pport} timed out"))?
+            .with_context(|| format!("connecting to proxy {phost}:{pport}"))?;
+    let _ = stream.set_nodelay(true);
+
+    let mut connect = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n");
+    if let Some(basic) = pcreds {
+        connect.push_str(&format!("Proxy-Authorization: Basic {basic}\r\n"));
+    }
+    connect.push_str("Proxy-Connection: keep-alive\r\n\r\n");
+    stream
+        .write_all(connect.as_bytes())
+        .await
+        .context("sending CONNECT to proxy")?;
+
+    // Read the proxy's response head (until CRLF CRLF).
+    let mut buf: Vec<u8> = Vec::with_capacity(256);
+    let mut tmp = [0u8; 256];
+    loop {
+        let n = tokio::time::timeout(timeout, stream.read(&mut tmp))
+            .await
+            .map_err(|_| anyhow!("proxy CONNECT response timed out"))?
+            .context("reading proxy CONNECT response")?;
+        if n == 0 {
+            bail!("proxy closed the connection during CONNECT");
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+        if buf.len() > 16 * 1024 {
+            bail!("proxy CONNECT response head too large");
+        }
+    }
+
+    let head = String::from_utf8_lossy(&buf);
+    let status_line = head.lines().next().unwrap_or("");
+    let ok = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse::<u16>().ok())
+        .map(|c| (200..300).contains(&c))
+        .unwrap_or(false);
+    if !ok {
+        bail!("proxy refused CONNECT: {}", status_line.trim());
+    }
+    Ok((stream, format!("{phost}:{pport}")))
+}
+
+/// Parse a proxy spec into `(host, port, optional base64("user:pass"))`.
+/// Accepts `http://host:port`, `host:port`, or bare `host` (defaults to :8080),
+/// with optional `user:pass@` userinfo.
+fn parse_proxy(proxy: &str) -> anyhow::Result<(String, u16, Option<String>)> {
+    let s = proxy.trim();
+    let s = s
+        .strip_prefix("http://")
+        .or_else(|| s.strip_prefix("https://"))
+        .unwrap_or(s);
+    let (creds, hostport) = match s.split_once('@') {
+        Some((userinfo, rest)) => {
+            let enc = base64::engine::general_purpose::STANDARD.encode(userinfo.as_bytes());
+            (Some(enc), rest)
+        }
+        None => (None, s),
+    };
+    let hostport = hostport.trim_end_matches('/');
+    let (host, port) = match hostport.rsplit_once(':') {
+        Some((h, p)) => (
+            h.to_string(),
+            p.parse::<u16>()
+                .map_err(|_| anyhow!("invalid proxy port: {p}"))?,
+        ),
+        None => (hostport.to_string(), 8080),
+    };
+    if host.is_empty() {
+        bail!("invalid proxy URL: {proxy}");
+    }
+    Ok((host, port, creds))
 }
 
 /// Read the full response body, tolerating an unclean TLS shutdown (a peer that
@@ -377,7 +731,7 @@ fn is_unclean_eof(err: &hyper::Error) -> bool {
     false
 }
 
-async fn connect_any(
+pub(crate) async fn connect_any(
     addrs: &[IpAddr],
     port: u16,
     timeout: Duration,
@@ -465,7 +819,7 @@ fn build_url(req: &HttpRequest) -> anyhow::Result<Url> {
     Ok(url)
 }
 
-fn build_hyper_request(
+pub(crate) fn build_hyper_request(
     url: &Url,
     method: &str,
     headers: &[(String, String)],
@@ -606,7 +960,7 @@ fn build_multipart(fields: &[MultipartField]) -> anyhow::Result<(Vec<u8>, String
     Ok((body, format!("multipart/form-data; boundary={boundary}")))
 }
 
-fn apply_auth(auth: &Auth, headers: &mut Vec<(String, String)>) {
+pub(crate) fn apply_auth(auth: &Auth, headers: &mut Vec<(String, String)>) {
     match auth.kind.as_str() {
         "bearer" => {
             if !auth.token.is_empty() {
@@ -764,6 +1118,10 @@ mod tests {
             verify_tls: true,
             pre_request_script: String::new(),
             post_response_script: String::new(),
+            reuse_connection: false,
+            proxy_url: String::new(),
+            client_cert_pem: String::new(),
+            client_key_pem: String::new(),
         };
         let url = build_url(&req).unwrap();
         assert_eq!(url.scheme(), "https");
@@ -790,6 +1148,10 @@ mod tests {
             verify_tls: true,
             pre_request_script: String::new(),
             post_response_script: String::new(),
+            reuse_connection: false,
+            proxy_url: String::new(),
+            client_cert_pem: String::new(),
+            client_key_pem: String::new(),
         };
         let url = build_url(&req).unwrap();
         let q = url.query().unwrap();

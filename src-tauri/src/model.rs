@@ -149,6 +149,19 @@ pub struct HttpRequest {
     /// JavaScript run after the response arrives (tests/assertions).
     #[serde(default)]
     pub post_response_script: String,
+    /// Keep-alive: reuse a pooled connection to the same origin when possible.
+    #[serde(default)]
+    pub reuse_connection: bool,
+    /// Optional upstream HTTP proxy "host:port" or "http://host:port"
+    /// (HTTPS targets are tunnelled via CONNECT).
+    #[serde(default)]
+    pub proxy_url: String,
+    /// Optional client certificate chain (PEM) for mutual TLS.
+    #[serde(default)]
+    pub client_cert_pem: String,
+    /// Optional client private key (PEM) for mutual TLS.
+    #[serde(default)]
+    pub client_key_pem: String,
 }
 
 fn default_method() -> String {
@@ -275,6 +288,12 @@ pub struct HttpResponse {
     pub final_url: String,
     /// Decoded (decompressed) body size in bytes.
     pub body_size_bytes: u64,
+    /// Reconstructed raw HTTP request (request line + headers + body).
+    #[serde(default)]
+    pub raw_request: String,
+    /// Reconstructed raw HTTP response head (status line + headers).
+    #[serde(default)]
+    pub raw_response_head: String,
 }
 
 /// A saved/named request stored in a collection.

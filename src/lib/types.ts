@@ -56,6 +56,10 @@ export interface HttpRequest {
   verifyTls: boolean;
   preRequestScript: string;
   postResponseScript: string;
+  reuseConnection: boolean;
+  proxyUrl: string;
+  clientCertPem: string;
+  clientKeyPem: string;
 }
 
 export interface Timings {
@@ -141,6 +145,8 @@ export interface HttpResponse {
   network: NetworkInfo;
   finalUrl: string;
   bodySizeBytes: number;
+  rawRequest: string;
+  rawResponseHead: string;
 }
 
 export interface SavedRequest {

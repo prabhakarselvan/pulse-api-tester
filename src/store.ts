@@ -6,10 +6,12 @@ import type {
   HistoryEntry,
   HttpRequest,
   HttpResponse,
+  NetworkInfo,
   SavedEnvironment,
   SavedRequest,
   Timings,
 } from "./lib/types";
+import type { StreamEvent } from "./lib/api";
 import { defaultRequest } from "./lib/samples";
 import { parsePostman } from "./lib/postman";
 import { runScript, type LogLine, type TestResult } from "./lib/scripting";
@@ -21,17 +23,49 @@ export interface ImportSummary {
   requests: number;
   environments: number;
 }
-export type BuilderTab = "params" | "headers" | "auth" | "body" | "scripts";
+export type BuilderTab =
+  | "params"
+  | "headers"
+  | "auth"
+  | "body"
+  | "scripts"
+  | "network";
 export type ResponseTab =
   | "body"
   | "headers"
   | "cookies"
   | "network"
   | "flow"
+  | "wire"
+  | "diff"
   | "security"
   | "profile"
   | "tests";
 export type BodyView = "pretty" | "raw" | "preview";
+
+/** Protocol the request builder is driving. */
+export type RequestMode = "http" | "ws" | "sse";
+
+export type RtStatus = "idle" | "connecting" | "open" | "closed" | "error";
+
+export interface RtMessage {
+  id: number;
+  direction: "sent" | "received" | "info" | "error" | "system";
+  text: string;
+  bytes?: number;
+  binary?: boolean;
+  at: number;
+}
+
+/** State of the single active realtime (WebSocket/SSE) connection. */
+export interface RealtimeState {
+  status: RtStatus;
+  protocol: string;
+  connId: string | null;
+  messages: RtMessage[];
+  open: { timings: Timings; network: NetworkInfo; status: number | null } | null;
+  error: string | null;
+}
 
 export interface ProfileState {
   running: boolean;
@@ -54,6 +88,7 @@ export interface Tab {
   builderTab: BuilderTab;
   responseTab: ResponseTab;
   bodyView: BodyView;
+  requestMode: RequestMode;
   profile: ProfileState | null;
   testResults: TestResult[];
   scriptLogs: LogLine[];
@@ -124,11 +159,25 @@ interface State {
   // Latency profiler.
   profile: ProfileState | null;
 
+  // Response A/B compare: a pinned baseline response to diff the current one against.
+  diffBaseline: HttpResponse | null;
+  pinDiffBaseline: () => void;
+  clearDiffBaseline: () => void;
+
   // UI state.
   sidebarTab: SidebarTab;
   builderTab: BuilderTab;
   responseTab: ResponseTab;
   bodyView: BodyView;
+  requestMode: RequestMode;
+
+  // Realtime (WebSocket / SSE) — one active connection at a time.
+  rt: RealtimeState;
+  rtConnect: () => Promise<void>;
+  rtSend: (text: string) => Promise<void>;
+  rtDisconnect: () => Promise<void>;
+  rtClear: () => void;
+  setRequestMode: (m: RequestMode) => void;
 
   // Request editing.
   setRequest: (r: HttpRequest) => void;
@@ -186,6 +235,7 @@ const freshTab = (): Tab => ({
   builderTab: "params",
   responseTab: "body",
   bodyView: "pretty",
+  requestMode: "http",
   profile: null,
   testResults: [],
   scriptLogs: [],
@@ -201,10 +251,42 @@ const flatFromTab = (t: Tab) => ({
   builderTab: t.builderTab,
   responseTab: t.responseTab,
   bodyView: t.bodyView,
+  requestMode: t.requestMode,
   profile: t.profile,
   testResults: t.testResults,
   scriptLogs: t.scriptLogs,
 });
+
+// Realtime message helpers (module-level; no store access needed).
+let rtMsgSeq = 0;
+// Monotonic connection epoch: every connect/disconnect bumps it so events from a
+// torn-down connection (e.g. its trailing "closed") can't clobber a newer one.
+let rtEpoch = 0;
+const freshRt = (): RealtimeState => ({
+  status: "idle",
+  protocol: "",
+  connId: null,
+  messages: [],
+  open: null,
+  error: null,
+});
+const RT_MSG_CAP = 500;
+function appendMsg(
+  list: RtMessage[],
+  direction: RtMessage["direction"],
+  text: string,
+  extra?: { bytes?: number; binary?: boolean },
+): RtMessage[] {
+  const msg: RtMessage = {
+    id: ++rtMsgSeq,
+    direction,
+    text,
+    at: Date.now(),
+    ...extra,
+  };
+  const next = [...list, msg];
+  return next.length > RT_MSG_CAP ? next.slice(next.length - RT_MSG_CAP) : next;
+}
 
 // Per-tab request tokens: bumping invalidates any in-flight send/profile for
 // that tab so a stale result never lands on a reset / reloaded request.
@@ -229,6 +311,7 @@ export const useStore = create<State>((set, get) => {
       builderTab: s.builderTab,
       responseTab: s.responseTab,
       bodyView: s.bodyView,
+      requestMode: s.requestMode,
       profile: s.profile,
       testResults: s.testResults,
       scriptLogs: s.scriptLogs,
@@ -236,6 +319,62 @@ export const useStore = create<State>((set, get) => {
   };
   const commitActive = (): Tab[] =>
     get().tabs.map((t) => (t.id === get().activeTabId ? snapshotActive() : t));
+
+  // Dispatch a realtime stream event into the `rt` slice.
+  const handleStreamEvent = (ev: StreamEvent) => {
+    switch (ev.kind) {
+      case "open":
+        set((s) => ({
+          rt: {
+            ...s.rt,
+            status: "open",
+            open: { timings: ev.timings, network: ev.network, status: ev.status },
+            messages: appendMsg(
+              s.rt.messages,
+              "system",
+              `Connected (${ev.protocol}${ev.status != null ? `, HTTP ${ev.status}` : ""})`,
+            ),
+          },
+        }));
+        break;
+      case "message":
+        set((s) => ({
+          rt: {
+            ...s.rt,
+            messages: appendMsg(s.rt.messages, ev.direction, ev.data, {
+              bytes: ev.bytes,
+              binary: ev.binary,
+            }),
+          },
+        }));
+        break;
+      case "info":
+        set((s) => ({
+          rt: { ...s.rt, messages: appendMsg(s.rt.messages, "info", ev.message) },
+        }));
+        break;
+      case "error":
+        set((s) => ({
+          rt: {
+            ...s.rt,
+            status: "error",
+            error: ev.message,
+            messages: appendMsg(s.rt.messages, "error", ev.message),
+          },
+        }));
+        break;
+      case "closed":
+        set((s) => ({
+          rt: {
+            ...s.rt,
+            status: s.rt.status === "error" ? "error" : "closed",
+            connId: null,
+            messages: appendMsg(s.rt.messages, "system", `Closed: ${ev.reason}`),
+          },
+        }));
+        break;
+    }
+  };
   const persistTabs = () => {
     try {
       const committed = commitActive();
@@ -280,6 +419,19 @@ export const useStore = create<State>((set, get) => {
   collections: [],
   envs: [],
   activeEnvId: null,
+
+  diffBaseline: null,
+  pinDiffBaseline: () => set({ diffBaseline: get().response }),
+  clearDiffBaseline: () => set({ diffBaseline: null }),
+
+  rt: {
+    status: "idle",
+    protocol: "",
+    connId: null,
+    messages: [],
+    open: null,
+    error: null,
+  },
 
   sidebarTab: "history",
 
@@ -677,5 +829,101 @@ export const useStore = create<State>((set, get) => {
   setBuilderTab: (t) => set({ builderTab: t }),
   setResponseTab: (t) => set({ responseTab: t }),
   setBodyView: (v) => set({ bodyView: v }),
+  setRequestMode: (m) => {
+    // Switching protocol tears down any live realtime connection.
+    if (m !== get().requestMode && get().rt.connId) get().rtDisconnect();
+    get().updateTab(get().activeTabId, { requestMode: m });
+  },
+
+  // --- Realtime (WebSocket / SSE) ---
+  rtConnect: async () => {
+    // Tear down any existing connection first (single active connection).
+    await get().rtDisconnect();
+
+    const mode = get().requestMode;
+    if (mode !== "ws" && mode !== "sse") return;
+    const request = get().request;
+    if (!request.url.trim()) {
+      set({ rt: { ...freshRt(), status: "error", error: "Enter a URL to connect." } });
+      return;
+    }
+
+    const myEpoch = ++rtEpoch;
+    set({
+      rt: {
+        status: "connecting",
+        protocol: mode === "ws" ? "WebSocket" : "SSE",
+        connId: null,
+        messages: appendMsg([], "system", `Connecting to ${request.url}…`),
+        open: null,
+        error: null,
+      },
+    });
+
+    const channel = new api.Channel<StreamEvent>();
+    // Ignore events once a newer connect/disconnect has superseded this attempt.
+    channel.onmessage = (ev) => {
+      if (myEpoch === rtEpoch) handleStreamEvent(ev);
+    };
+
+    try {
+      const id =
+        mode === "ws"
+          ? await api.wsConnect(request, channel)
+          : await api.sseConnect(request, channel);
+      // Only adopt the id if we're still the current attempt.
+      if (myEpoch === rtEpoch) set((s) => ({ rt: { ...s.rt, connId: id } }));
+      else {
+        // Superseded while connecting — close the now-orphaned connection.
+        if (mode === "ws") api.wsClose(id).catch(() => {});
+        else api.sseClose(id).catch(() => {});
+      }
+    } catch (e) {
+      if (myEpoch === rtEpoch) set((s) => ({ rt: { ...s.rt, status: "error", error: String(e) } }));
+    }
+  },
+
+  rtSend: async (text: string) => {
+    const { rt } = get();
+    if (rt.status !== "open" || !rt.connId) return;
+    if (get().requestMode !== "ws") return; // SSE is receive-only
+    try {
+      await api.wsSend(rt.connId, text);
+    } catch (e) {
+      set((s) => ({ rt: { ...s.rt, messages: appendMsg(s.rt.messages, "error", String(e)) } }));
+    }
+  },
+
+  rtDisconnect: async () => {
+    const { rt } = get();
+    // Orphan any events the connection we're tearing down may still emit.
+    rtEpoch++;
+    if (!rt.connId) {
+      if (rt.status === "connecting" || rt.status === "open") {
+        set((s) => ({ rt: { ...s.rt, status: "closed" } }));
+      }
+      return;
+    }
+    const id = rt.connId;
+    // Set terminal state immediately — we no longer trust async trailing events.
+    set((s) => ({
+      rt: {
+        ...s.rt,
+        status: "closed",
+        connId: null,
+        messages: appendMsg(s.rt.messages, "system", "Disconnected"),
+      },
+    }));
+    try {
+      // Close via the ACTUAL connection's protocol, not the current mode
+      // (the user may have switched tabs/mode while a socket is live).
+      if (rt.protocol === "SSE") await api.sseClose(id);
+      else await api.wsClose(id);
+    } catch {
+      /* already gone */
+    }
+  },
+
+  rtClear: () => set((s) => ({ rt: { ...s.rt, messages: [] } })),
   };
 });

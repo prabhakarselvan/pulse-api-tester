@@ -27,6 +27,10 @@ async fn main() {
         verify_tls: true,
         pre_request_script: String::new(),
         post_response_script: String::new(),
+        reuse_connection: false,
+        proxy_url: String::new(),
+        client_cert_pem: String::new(),
+        client_key_pem: String::new(),
     };
 
     match net::execute(req).await {

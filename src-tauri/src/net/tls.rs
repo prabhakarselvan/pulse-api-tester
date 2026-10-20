@@ -6,22 +6,30 @@
 
 use crate::model::{CertInfo, TlsInfo};
 use anyhow::Context;
+use base64::Engine;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::WebPkiSupportedAlgorithms;
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
-use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls_pki_types::{
+    CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, PrivateSec1KeyDer,
+    ServerName, UnixTime,
+};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
 
+/// A parsed client-certificate chain + private key for mutual TLS.
+type ClientAuth = (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>);
+
 /// Build a rustls client config. When `verify` is false, certificate
 /// verification is disabled (useful for self-signed / staging servers).
-fn make_config(verify: bool) -> Arc<ClientConfig> {
+/// `client_auth`, when set, presents a client certificate for mutual TLS.
+fn make_config(verify: bool, client_auth: Option<ClientAuth>) -> anyhow::Result<Arc<ClientConfig>> {
     let provider = rustls::crypto::ring::default_provider();
 
-    let mut config = if verify {
+    let builder = if verify {
         let mut roots = RootCertStore::empty();
         // Mozilla's bundled roots — always present.
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -34,7 +42,6 @@ fn make_config(verify: bool) -> Arc<ClientConfig> {
             .with_safe_default_protocol_versions()
             .expect("default TLS versions are valid")
             .with_root_certificates(roots)
-            .with_no_client_auth()
     } else {
         let algs = provider.signature_verification_algorithms;
         ClientConfig::builder_with_provider(Arc::new(provider))
@@ -42,12 +49,18 @@ fn make_config(verify: bool) -> Arc<ClientConfig> {
             .expect("default TLS versions are valid")
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(NoVerifier(algs)))
-            .with_no_client_auth()
+    };
+
+    let mut config = match client_auth {
+        Some((certs, key)) => builder
+            .with_client_auth_cert(certs, key)
+            .context("invalid client certificate or private key")?,
+        None => builder.with_no_client_auth(),
     };
 
     // Offer HTTP/2 then HTTP/1.1 via ALPN.
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-    Arc::new(config)
+    Ok(Arc::new(config))
 }
 
 /// Perform the TLS handshake and extract connection detail.
@@ -56,8 +69,11 @@ pub async fn handshake(
     tcp: TcpStream,
     host: &str,
     verify: bool,
+    client_cert_pem: &str,
+    client_key_pem: &str,
 ) -> anyhow::Result<(TlsStream<TcpStream>, TlsInfo, bool)> {
-    let connector = TlsConnector::from(make_config(verify));
+    let client_auth = parse_client_auth(client_cert_pem, client_key_pem)?;
+    let connector = TlsConnector::from(make_config(verify, client_auth)?);
     let server_name = ServerName::try_from(host.to_string())
         .map_err(|_| anyhow::anyhow!("invalid server name for TLS: {host}"))?;
 
@@ -91,6 +107,66 @@ pub async fn handshake(
         certificates,
     };
     Ok((tls, info, is_h2))
+}
+
+/// Parse a client certificate chain + private key from PEM text for mutual TLS.
+/// Returns `Ok(None)` when neither is supplied. Both must be present together.
+fn parse_client_auth(cert_pem: &str, key_pem: &str) -> anyhow::Result<Option<ClientAuth>> {
+    let has_cert = !cert_pem.trim().is_empty();
+    let has_key = !key_pem.trim().is_empty();
+    if !has_cert && !has_key {
+        return Ok(None);
+    }
+    if has_cert != has_key {
+        anyhow::bail!("mutual TLS requires BOTH a client certificate and a private key");
+    }
+
+    let certs: Vec<CertificateDer<'static>> = pem_blocks(cert_pem)
+        .into_iter()
+        .filter(|(label, _)| label == "CERTIFICATE")
+        .map(|(_, der)| CertificateDer::from(der))
+        .collect();
+    if certs.is_empty() {
+        anyhow::bail!("no CERTIFICATE block found in the client certificate PEM");
+    }
+
+    let key = pem_blocks(key_pem)
+        .into_iter()
+        .find_map(|(label, der)| match label.as_str() {
+            "PRIVATE KEY" => Some(PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(der))),
+            "RSA PRIVATE KEY" => Some(PrivateKeyDer::Pkcs1(PrivatePkcs1KeyDer::from(der))),
+            "EC PRIVATE KEY" => Some(PrivateKeyDer::Sec1(PrivateSec1KeyDer::from(der))),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!("no PRIVATE KEY block (PKCS#8/PKCS#1/SEC1) found in the client key PEM")
+        })?;
+
+    Ok(Some((certs, key)))
+}
+
+/// Split PEM text into `(label, DER bytes)` pairs, e.g. ("CERTIFICATE", <der>).
+fn pem_blocks(pem: &str) -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut lines = pem.lines();
+    while let Some(line) = lines.next() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("-----BEGIN ") {
+            let label = rest.trim_end_matches('-').trim().to_string();
+            let mut b64 = String::new();
+            for l in lines.by_ref() {
+                let l = l.trim();
+                if l.starts_with("-----END ") {
+                    break;
+                }
+                b64.push_str(l);
+            }
+            if let Ok(der) = base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) {
+                out.push((label, der));
+            }
+        }
+    }
+    out
 }
 
 /// "TLSv1_3" -> "TLS 1.3"

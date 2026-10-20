@@ -4,6 +4,8 @@
 
 pub mod client;
 pub mod dns;
+pub mod realtime;
+pub mod stream;
 pub mod tls;
 
 pub use client::execute;

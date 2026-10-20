@@ -43,6 +43,10 @@ export function defaultRequest(): HttpRequest {
     verifyTls: true,
     preRequestScript: "",
     postResponseScript: "",
+    reuseConnection: false,
+    proxyUrl: "",
+    clientCertPem: "",
+    clientKeyPem: "",
   };
 }
 

@@ -1,14 +1,16 @@
 // Thin wrappers around the Tauri `invoke` boundary. Argument names must match
 // the Rust command parameter identifiers in `src-tauri/src/commands.rs`.
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, Channel } from "@tauri-apps/api/core";
 import type {
   Collection,
   HistoryEntry,
   HttpRequest,
   HttpResponse,
+  NetworkInfo,
   SavedEnvironment,
   SavedRequest,
+  Timings,
 } from "./types";
 
 export const sendRequest = (
@@ -53,3 +55,29 @@ export const deleteCollection = (id: string) =>
   invoke<void>("delete_collection", { id });
 export const readTextFile = (path: string) =>
   invoke<string>("read_text_file", { path });
+
+export const geoLookup = (ip: string) => invoke<string>("geo_lookup", { ip });
+
+// Realtime: WebSocket + SSE streaming over a Tauri Channel.
+export type StreamEvent =
+  | {
+      kind: "open";
+      protocol: string;
+      status: number | null;
+      timings: Timings;
+      network: NetworkInfo;
+    }
+  | { kind: "message"; direction: "sent" | "received"; data: string; bytes: number; binary: boolean }
+  | { kind: "info"; message: string }
+  | { kind: "error"; message: string }
+  | { kind: "closed"; reason: string };
+
+export { Channel };
+
+export const wsConnect = (request: HttpRequest, onEvent: Channel<StreamEvent>) =>
+  invoke<string>("ws_connect", { request, onEvent });
+export const wsSend = (id: string, text: string) => invoke<void>("ws_send", { id, text });
+export const wsClose = (id: string) => invoke<void>("ws_close", { id });
+export const sseConnect = (request: HttpRequest, onEvent: Channel<StreamEvent>) =>
+  invoke<string>("sse_connect", { request, onEvent });
+export const sseClose = (id: string) => invoke<void>("sse_close", { id });

@@ -30,6 +30,12 @@ http = "1"
 http-body-util = "0.1"
 bytes = "1"
 
+# WebSocket (framing only; we provide our own instrumented TLS/TCP stream so we
+# keep DNS/TCP/TLS timings for the handshake). default-features off avoids the
+# native-tls backend the corporate proxy blocks.
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+
 # TLS (rustls with the `ring` provider — no cmake / C-heavy build needed).
 # The one transitively-required crate the corporate proxy blocks (`untrusted`)
 # is sourced from git instead — see [patch.crates-io] below.

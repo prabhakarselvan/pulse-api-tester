@@ -13,6 +13,8 @@ import {
 import { CodeEditor } from "./CodeEditor";
 import { NetworkPanel } from "./NetworkPanel";
 import { FlowPanel } from "./FlowPanel";
+import { WirePanel } from "./WirePanel";
+import { DiffPanel } from "./DiffPanel";
 import { SecurityPanel } from "./SecurityPanel";
 import { ProfilePanel } from "./ProfilePanel";
 import { TestsPanel } from "./TestsPanel";
@@ -31,6 +33,7 @@ export function ResponsePanel() {
   const responseTab = useStore((s) => s.responseTab);
   const setResponseTab = useStore((s) => s.setResponseTab);
   const testResults = useStore((s) => s.testResults);
+  const diffArmed = useStore((s) => s.diffBaseline != null);
 
   const cookieCount = response
     ? response.headers.filter((h) => h.key.toLowerCase() === "set-cookie").length
@@ -42,6 +45,8 @@ export function ResponsePanel() {
     { value: "cookies", label: "Cookies", badge: cookieCount || undefined },
     { value: "network", label: "Network" },
     { value: "flow", label: "Flow" },
+    { value: "wire", label: "Wire" },
+    { value: "diff", label: "Diff", badge: diffArmed ? "A" : undefined },
     { value: "security", label: "Security" },
     { value: "profile", label: "Profile" },
     {
@@ -57,6 +62,7 @@ export function ResponsePanel() {
     // Profiler + tests work even before/without a response (e.g. show logs).
     if (responseTab === "profile") return <ProfilePanel />;
     if (responseTab === "tests") return <TestsPanel />;
+    if (responseTab === "diff") return <DiffPanel />;
     if (loading) return <LoadingState />;
     if (error) return <ErrorState error={error} />;
     if (!response)
@@ -78,6 +84,8 @@ export function ResponsePanel() {
         return <NetworkPanel res={response} />;
       case "flow":
         return <FlowPanel res={response} />;
+      case "wire":
+        return <WirePanel res={response} />;
       case "security":
         return <SecurityPanel res={response} />;
       default:
