@@ -33,6 +33,7 @@ export interface Body {
   binaryPath: string;
   soapVersion: "1.1" | "1.2";
   soapAction: string;
+  soapEnvelope: string;
 }
 
 export type AuthKind = "none" | "bearer" | "basic" | "apikey";

@@ -48,12 +48,13 @@ export function BodyEditor() {
 
   const selectMode = (m: BodyMode) => {
     if (m === "soap") {
-      // Keep an existing envelope; otherwise scaffold a blank one (don't leave a
-      // JSON/text body sitting in the XML editor). Nudge the verb to POST.
-      const looksLikeEnvelope = /<[\w-]*:?Envelope[\s/>]/.test(body.raw);
-      const raw = looksLikeEnvelope ? body.raw : emptyEnvelope(body.soapVersion);
+      // The SOAP envelope lives in its own field (never `raw`), so switching
+      // modes preserves a JSON/text body. Scaffold a blank envelope on first use.
+      const soapEnvelope = body.soapEnvelope.trim()
+        ? body.soapEnvelope
+        : emptyEnvelope(body.soapVersion);
       patch({
-        body: { ...body, mode: m, raw },
+        body: { ...body, mode: m, soapEnvelope },
         method: method === "GET" ? "POST" : method,
       });
     } else {
@@ -211,13 +212,13 @@ function SoapEditor({
   const [wsdlOpen, setWsdlOpen] = useState(false);
 
   const setVersion = (v: SoapVersion) =>
-    setBody({ soapVersion: v, raw: switchEnvelopeVersion(body.raw, v) });
+    setBody({ soapVersion: v, soapEnvelope: switchEnvelopeVersion(body.soapEnvelope, v) });
 
   const applyOperation = (op: WsdlOperation) => {
     setBody({
       soapVersion: op.version,
       soapAction: op.soapAction,
-      raw: op.envelope,
+      soapEnvelope: op.envelope,
     });
     if (op.endpoint) patch({ url: op.endpoint });
     setWsdlOpen(false);
@@ -249,8 +250,8 @@ function SoapEditor({
       <div className="min-h-0 flex-1">
         <Panel className="h-full overflow-hidden">
           <CodeEditor
-            value={body.raw}
-            onChange={(v) => setBody({ raw: v })}
+            value={body.soapEnvelope}
+            onChange={(v) => setBody({ soapEnvelope: v })}
             lang="xml"
             placeholder={emptyEnvelope(body.soapVersion)}
           />

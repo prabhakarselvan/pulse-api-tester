@@ -274,6 +274,7 @@ fn substitute_request(req: &HttpRequest, vars: &HashMap<String, String>) -> Http
     r.body.raw = apply_vars(&r.body.raw, vars);
     r.body.graphql_variables = apply_vars(&r.body.graphql_variables, vars);
     r.body.soap_action = apply_vars(&r.body.soap_action, vars);
+    r.body.soap_envelope = apply_vars(&r.body.soap_envelope, vars);
     r.body.binary_path = apply_vars(&r.body.binary_path, vars);
     for kv in r.body.form.iter_mut() {
         kv.key = apply_vars(&kv.key, vars);

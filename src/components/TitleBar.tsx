@@ -12,7 +12,7 @@ export function TitleBar() {
   return (
     <header
       data-tauri-drag-region
-      className="drag-region flex h-11 shrink-0 items-center gap-2 border-b border-slate-200 bg-white/80 pl-20 pr-3 backdrop-blur dark:border-white/[0.08] dark:bg-[#0b0e14]/80"
+      className="drag-region flex h-11 shrink-0 items-center gap-2 border-b border-slate-200 bg-white/80 pl-[92px] pr-3 backdrop-blur dark:border-white/[0.08] dark:bg-[#0b0e14]/80"
     >
       <Activity size={16} className="text-indigo-500" />
       <span className="text-sm font-semibold text-slate-800 dark:text-slate-100">

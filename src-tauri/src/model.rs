@@ -77,6 +77,10 @@ pub struct Body {
     /// SOAP action URI (SOAPAction header for 1.1, Content-Type `action` for 1.2).
     #[serde(default)]
     pub soap_action: String,
+    /// SOAP envelope XML (kept separate from `raw` so switching body modes
+    /// doesn't clobber a JSON/text body).
+    #[serde(default)]
+    pub soap_envelope: String,
 }
 
 fn default_soap_version() -> String {
@@ -94,6 +98,7 @@ impl Default for Body {
             binary_path: String::new(),
             soap_version: default_soap_version(),
             soap_action: String::new(),
+            soap_envelope: String::new(),
         }
     }
 }

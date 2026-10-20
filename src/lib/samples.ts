@@ -20,6 +20,7 @@ export const defaultBody = (): Body => ({
   binaryPath: "",
   soapVersion: "1.1",
   soapAction: "",
+  soapEnvelope: "",
 });
 
 export const defaultAuth = (): Auth => ({

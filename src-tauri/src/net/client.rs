@@ -920,7 +920,7 @@ fn build_body(body: &Body) -> anyhow::Result<(Bytes, Option<String>)> {
             Ok((Bytes::from(data), Some(ct)))
         }
         "soap" => {
-            let bytes = Bytes::from(body.raw.clone().into_bytes());
+            let bytes = Bytes::from(body.soap_envelope.clone().into_bytes());
             // SOAP 1.2 carries the action inside the Content-Type; 1.1 uses a
             // separate SOAPAction header (added in `prepare_request`).
             let ct = if body.soap_version == "1.2" {
@@ -1236,7 +1236,7 @@ mod tests {
             headers: vec![],
             body: Body {
                 mode: "soap".into(),
-                raw: "<soap:Envelope/>".into(),
+                soap_envelope: "<soap:Envelope/>".into(),
                 soap_version: "1.1".into(),
                 soap_action: "urn:doThing".into(),
                 ..Body::default()
@@ -1276,7 +1276,7 @@ mod tests {
             headers: vec![],
             body: Body {
                 mode: "soap".into(),
-                raw: "<soap:Envelope/>".into(),
+                soap_envelope: "<soap:Envelope/>".into(),
                 soap_version: "1.2".into(),
                 soap_action: "urn:doThing".into(),
                 ..Body::default()

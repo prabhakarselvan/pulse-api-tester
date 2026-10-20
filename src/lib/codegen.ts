@@ -33,6 +33,15 @@ export function effectiveHeaders(req: HttpRequest): KeyValue[] {
   const ct = defaultContentType(req);
   if (ct && !hasCt) out.push({ enabled: true, key: "Content-Type", value: ct });
 
+  // SOAP 1.1 carries the action in a separate quoted header.
+  if (
+    req.body.mode === "soap" &&
+    req.body.soapVersion !== "1.2" &&
+    !out.some((h) => h.key.toLowerCase() === "soapaction")
+  ) {
+    out.push({ enabled: true, key: "SOAPAction", value: `"${req.body.soapAction.trim()}"` });
+  }
+
   const a = req.auth;
   if (a.kind === "bearer" && a.token) out.push({ enabled: true, key: "Authorization", value: `Bearer ${a.token}` });
   if (a.kind === "basic") {
@@ -54,6 +63,15 @@ function defaultContentType(req: HttpRequest): string | null {
       return "text/plain";
     case "form":
       return "application/x-www-form-urlencoded";
+    case "soap": {
+      if (req.body.soapVersion === "1.2") {
+        const action = req.body.soapAction.trim();
+        return action
+          ? `application/soap+xml; charset=utf-8; action="${action}"`
+          : "application/soap+xml; charset=utf-8";
+      }
+      return "text/xml; charset=utf-8";
+    }
     default:
       return null;
   }
@@ -71,6 +89,8 @@ export function bodyText(req: HttpRequest): string {
         query: b.raw,
         variables: safeJson(b.graphqlVariables),
       });
+    case "soap":
+      return b.soapEnvelope;
     case "form":
       return b.form
         .filter((f) => f.enabled && f.key)
