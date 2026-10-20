@@ -18,6 +18,8 @@ export const defaultBody = (): Body => ({
   multipart: [],
   graphqlVariables: "",
   binaryPath: "",
+  soapVersion: "1.1",
+  soapAction: "",
 });
 
 export const defaultAuth = (): Auth => ({

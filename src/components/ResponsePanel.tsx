@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { AlertTriangle, Check, Copy, Radio } from "lucide-react";
 import { useStore, type ResponseTab, type BodyView } from "../store";
 import type { HttpResponse, KeyValue } from "../lib/types";
+import { parseSoapFault, type SoapFault } from "../lib/soap";
 import {
   detectLang,
   formatBytes,
@@ -157,9 +158,11 @@ function ResponseBody({ res }: { res: HttpResponse }) {
   ];
 
   const empty = !res.body && !res.bodyBase64;
+  const fault = useMemo(() => parseSoapFault(res.body), [res.body]);
 
   return (
     <div className="flex h-full flex-col gap-2 px-3 pb-3">
+      {fault && <SoapFaultBanner fault={fault} />}
       <Segmented options={views} value={bodyView} onChange={setBodyView} />
       <div className="min-h-0 flex-1">
         {empty ? (
@@ -176,6 +179,34 @@ function ResponseBody({ res }: { res: HttpResponse }) {
           </Panel>
         )}
       </div>
+    </div>
+  );
+}
+
+function SoapFaultBanner({ fault }: { fault: SoapFault }) {
+  return (
+    <div className="rounded-lg border border-rose-300/60 bg-rose-50 px-3 py-2 dark:border-rose-500/30 dark:bg-rose-500/10">
+      <div className="flex items-center gap-2">
+        <AlertTriangle size={14} className="shrink-0 text-rose-500" />
+        <span className="text-xs font-semibold text-rose-700 dark:text-rose-300">
+          SOAP {fault.version} Fault
+        </span>
+        {fault.code && (
+          <span className="rounded bg-rose-500/15 px-1.5 py-0.5 font-mono text-[10px] text-rose-600 dark:text-rose-300">
+            {fault.code}
+          </span>
+        )}
+      </div>
+      {fault.message && (
+        <p className="mt-1 break-words font-mono text-[11px] text-rose-700/90 dark:text-rose-200/90">
+          {fault.message}
+        </p>
+      )}
+      {fault.detail && (
+        <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] text-rose-600/70 dark:text-rose-300/60">
+          {fault.detail.slice(0, 600)}
+        </pre>
+      )}
     </div>
   );
 }

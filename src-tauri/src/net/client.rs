@@ -787,6 +787,17 @@ fn prepare_request(req: &HttpRequest) -> anyhow::Result<Prepared> {
         }
     }
 
+    // SOAP 1.1 signals the operation via a separate, quoted SOAPAction header.
+    if req.body.mode == "soap"
+        && req.body.soap_version != "1.2"
+        && !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("soapaction"))
+    {
+        headers.push((
+            "SOAPAction".into(),
+            format!("\"{}\"", req.body.soap_action.trim()),
+        ));
+    }
+
     apply_auth(&req.auth, &mut headers);
     Ok(Prepared { headers, body })
 }
@@ -907,6 +918,22 @@ fn build_body(body: &Body) -> anyhow::Result<(Bytes, Option<String>)> {
         "multipart" => {
             let (data, ct) = build_multipart(&body.multipart)?;
             Ok((Bytes::from(data), Some(ct)))
+        }
+        "soap" => {
+            let bytes = Bytes::from(body.raw.clone().into_bytes());
+            // SOAP 1.2 carries the action inside the Content-Type; 1.1 uses a
+            // separate SOAPAction header (added in `prepare_request`).
+            let ct = if body.soap_version == "1.2" {
+                let action = body.soap_action.trim();
+                if action.is_empty() {
+                    "application/soap+xml; charset=utf-8".to_string()
+                } else {
+                    format!("application/soap+xml; charset=utf-8; action=\"{action}\"")
+                }
+            } else {
+                "text/xml; charset=utf-8".to_string()
+            };
+            Ok((bytes, Some(ct)))
         }
         other => bail!("unknown body mode: {other}"),
     }
@@ -1198,5 +1225,86 @@ mod tests {
         let (bytes, ct) = build_body(&body).unwrap();
         assert_eq!(ct.as_deref(), Some("application/json"));
         assert_eq!(&bytes[..], b"{\"a\":1}");
+    }
+
+    #[test]
+    fn soap11_sets_textxml_and_soapaction_header() {
+        let req = HttpRequest {
+            method: "POST".into(),
+            url: "https://example.com/svc".into(),
+            query_params: vec![],
+            headers: vec![],
+            body: Body {
+                mode: "soap".into(),
+                raw: "<soap:Envelope/>".into(),
+                soap_version: "1.1".into(),
+                soap_action: "urn:doThing".into(),
+                ..Body::default()
+            },
+            auth: Auth::default(),
+            follow_redirects: true,
+            timeout_ms: 30000,
+            verify_tls: true,
+            pre_request_script: String::new(),
+            post_response_script: String::new(),
+            reuse_connection: false,
+            proxy_url: String::new(),
+            client_cert_pem: String::new(),
+            client_key_pem: String::new(),
+        };
+        let prepared = prepare_request(&req).unwrap();
+        let ct = prepared
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+            .map(|(_, v)| v.clone());
+        assert_eq!(ct.as_deref(), Some("text/xml; charset=utf-8"));
+        let action = prepared
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("soapaction"))
+            .map(|(_, v)| v.clone());
+        assert_eq!(action.as_deref(), Some("\"urn:doThing\""));
+    }
+
+    #[test]
+    fn soap12_folds_action_into_content_type_and_omits_header() {
+        let req = HttpRequest {
+            method: "POST".into(),
+            url: "https://example.com/svc".into(),
+            query_params: vec![],
+            headers: vec![],
+            body: Body {
+                mode: "soap".into(),
+                raw: "<soap:Envelope/>".into(),
+                soap_version: "1.2".into(),
+                soap_action: "urn:doThing".into(),
+                ..Body::default()
+            },
+            auth: Auth::default(),
+            follow_redirects: true,
+            timeout_ms: 30000,
+            verify_tls: true,
+            pre_request_script: String::new(),
+            post_response_script: String::new(),
+            reuse_connection: false,
+            proxy_url: String::new(),
+            client_cert_pem: String::new(),
+            client_key_pem: String::new(),
+        };
+        let prepared = prepare_request(&req).unwrap();
+        let ct = prepared
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+            .map(|(_, v)| v.clone());
+        assert_eq!(
+            ct.as_deref(),
+            Some("application/soap+xml; charset=utf-8; action=\"urn:doThing\"")
+        );
+        assert!(!prepared
+            .headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("soapaction")));
     }
 }

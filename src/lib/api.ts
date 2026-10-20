@@ -58,6 +58,8 @@ export const readTextFile = (path: string) =>
 
 export const geoLookup = (ip: string) => invoke<string>("geo_lookup", { ip });
 
+export const fetchWsdl = (url: string) => invoke<string>("fetch_wsdl", { url });
+
 // Realtime: WebSocket + SSE streaming over a Tauri Channel.
 export type StreamEvent =
   | {

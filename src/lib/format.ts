@@ -85,7 +85,44 @@ export function maybePretty(text: string, lang: BodyLang): string {
       return text;
     }
   }
+  if (lang === "xml") return prettyXml(text);
   return text;
+}
+
+/**
+ * Lightweight XML pretty-printer (no parser): puts each tag on its own line and
+ * indents by nesting depth. Best-effort — returns the input unchanged on any
+ * surprise. Good enough for SOAP envelopes and typical XML payloads.
+ */
+export function prettyXml(xml: string): string {
+  const trimmed = xml.trim();
+  if (!trimmed.startsWith("<")) return xml;
+  // Re-indenting would split tag-like sequences inside CDATA/comments — leave
+  // those documents untouched rather than risk corrupting their content.
+  if (trimmed.includes("<![CDATA[") || trimmed.includes("<!--")) return xml;
+  try {
+    const PAD = "  ";
+    // Break between adjacent tags so each ends up on its own line.
+    const split = trimmed.replace(/>\s*</g, ">\n<");
+    let depth = 0;
+    const out: string[] = [];
+    for (let line of split.split("\n")) {
+      line = line.trim();
+      if (!line) continue;
+      const isClosing = /^<\//.test(line);
+      const isSelfContained =
+        /^<\?/.test(line) || // declaration
+        /^<!--/.test(line) || // comment
+        /\/>\s*$/.test(line) || // self-closing
+        /^<[^>]+>[^<]*<\/[^>]+>\s*$/.test(line); // <a>text</a> on one line
+      if (isClosing) depth = Math.max(depth - 1, 0);
+      out.push(PAD.repeat(depth) + line);
+      if (!isClosing && !isSelfContained && /^<[^!?]/.test(line)) depth += 1;
+    }
+    return out.join("\n");
+  } catch {
+    return xml;
+  }
 }
 
 /**

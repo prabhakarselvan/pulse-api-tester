@@ -54,9 +54,9 @@ pub struct MultipartField {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Body {
-    /// "none" | "json" | "text" | "form" | "multipart" | "binary" | "graphql"
+    /// "none" | "json" | "text" | "form" | "multipart" | "binary" | "graphql" | "soap"
     pub mode: String,
-    /// Raw text for json/text, and the query for graphql.
+    /// Raw text for json/text/soap (the SOAP envelope), and the query for graphql.
     #[serde(default)]
     pub raw: String,
     /// x-www-form-urlencoded fields.
@@ -71,6 +71,16 @@ pub struct Body {
     /// Absolute path to a file for `mode == "binary"`.
     #[serde(default)]
     pub binary_path: String,
+    /// SOAP version for `mode == "soap"`: "1.1" | "1.2".
+    #[serde(default = "default_soap_version")]
+    pub soap_version: String,
+    /// SOAP action URI (SOAPAction header for 1.1, Content-Type `action` for 1.2).
+    #[serde(default)]
+    pub soap_action: String,
+}
+
+fn default_soap_version() -> String {
+    "1.1".into()
 }
 
 impl Default for Body {
@@ -82,6 +92,8 @@ impl Default for Body {
             multipart: Vec::new(),
             graphql_variables: String::new(),
             binary_path: String::new(),
+            soap_version: default_soap_version(),
+            soap_action: String::new(),
         }
     }
 }

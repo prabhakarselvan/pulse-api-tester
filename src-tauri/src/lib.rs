@@ -48,6 +48,7 @@ pub fn run() {
             commands::delete_collection,
             commands::read_text_file,
             commands::geo_lookup,
+            commands::fetch_wsdl,
             net::realtime::ws_connect,
             net::realtime::ws_send,
             net::realtime::ws_close,

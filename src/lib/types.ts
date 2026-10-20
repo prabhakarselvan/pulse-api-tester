@@ -14,7 +14,8 @@ export type BodyMode =
   | "form"
   | "multipart"
   | "binary"
-  | "graphql";
+  | "graphql"
+  | "soap";
 
 export interface MultipartField {
   enabled: boolean;
@@ -30,6 +31,8 @@ export interface Body {
   multipart: MultipartField[];
   graphqlVariables: string;
   binaryPath: string;
+  soapVersion: "1.1" | "1.2";
+  soapAction: string;
 }
 
 export type AuthKind = "none" | "bearer" | "basic" | "apikey";
