@@ -28,6 +28,8 @@ export function RequestPanel() {
   const builderTab = useStore((s) => s.builderTab);
   const setBuilderTab = useStore((s) => s.setBuilderTab);
   const newRequest = useStore((s) => s.newRequest);
+  const requestName = useStore((s) => s.requestName);
+  const setRequestName = useStore((s) => s.setRequestName);
 
   const enabledParams = request.queryParams.filter((p) => p.enabled && p.key).length;
   const enabledHeaders = request.headers.filter((h) => h.enabled && h.key).length;
@@ -55,6 +57,15 @@ export function RequestPanel() {
 
   return (
     <div className="flex h-full flex-col gap-3 p-3">
+      {/* Request name (shown above the endpoint toolbar) */}
+      <input
+        value={requestName}
+        onChange={(e) => setRequestName(e.target.value)}
+        placeholder="Untitled request"
+        spellCheck={false}
+        className="no-drag w-full bg-transparent px-1 text-sm font-semibold text-slate-800 outline-none placeholder:font-normal placeholder:text-slate-400 dark:text-slate-100 dark:placeholder:text-slate-500"
+      />
+
       {/* Method + URL + Send */}
       <div className="flex items-stretch gap-2">
         <div className="flex flex-1 items-stretch overflow-hidden rounded-lg border border-slate-200 bg-white focus-within:border-indigo-400 focus-within:ring-2 focus-within:ring-indigo-500/20 dark:border-white/10 dark:bg-white/[0.03]">
@@ -276,15 +287,17 @@ function SaveControl() {
   const saveCurrent = useStore((s) => s.saveCurrent);
 
   const openDialog = () => {
-    // Default name from the URL.
-    let def = "Untitled request";
-    try {
-      const u = new URL(
-        request.url.includes("://") ? request.url : `https://${request.url}`,
-      );
-      def = `${request.method} ${u.host}${u.pathname === "/" ? "" : u.pathname}`;
-    } catch {
-      /* keep default */
+    // Prefer the current request name; otherwise derive one from the URL.
+    let def = useStore.getState().requestName.trim();
+    if (!def) {
+      try {
+        const u = new URL(
+          request.url.includes("://") ? request.url : `https://${request.url}`,
+        );
+        def = `${request.method} ${u.host}${u.pathname === "/" ? "" : u.pathname}`;
+      } catch {
+        def = "Untitled request";
+      }
     }
     setName(def);
     setOpen(true);

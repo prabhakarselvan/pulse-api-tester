@@ -211,7 +211,7 @@ function ItemRow({
 
   return (
     <button
-      onClick={() => item.request && loadRequest(item.request)}
+      onClick={() => item.request && loadRequest(item.request, item.name)}
       style={pad}
       className="flex w-full items-center gap-2 py-1.5 pr-2 text-left transition hover:bg-slate-100 dark:hover:bg-white/[0.03]"
       title={item.request?.url}

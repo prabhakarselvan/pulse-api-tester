@@ -21,6 +21,7 @@ export function TabBar() {
   const activeTabId = useStore((s) => s.activeTabId);
   const activeRequest = useStore((s) => s.request); // live state of the active tab
   const activeLoading = useStore((s) => s.loading);
+  const activeName = useStore((s) => s.requestName);
   const switchTab = useStore((s) => s.switchTab);
   const closeTab = useStore((s) => s.closeTab);
   const newTab = useStore((s) => s.newTab);
@@ -31,6 +32,8 @@ export function TabBar() {
         const active = t.id === activeTabId;
         const req = active ? activeRequest : t.request;
         const loading = active ? activeLoading : t.loading;
+        const name = active ? activeName : t.name;
+        const label = name && name.trim() ? name : tabLabel(req);
         return (
           <div
             key={t.id}
@@ -52,7 +55,7 @@ export function TabBar() {
             <span className={cx("shrink-0 font-mono text-[10px] font-bold", methodColor(req.method))}>
               {req.method}
             </span>
-            <span className="min-w-0 flex-1 truncate">{tabLabel(req)}</span>
+            <span className="min-w-0 flex-1 truncate">{label}</span>
             {loading ? (
               <Spinner className="h-3 w-3 shrink-0 text-indigo-500" />
             ) : (

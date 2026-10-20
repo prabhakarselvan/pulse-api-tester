@@ -45,6 +45,7 @@ export type Layout = "horizontal" | "vertical";
 /** One workspace tab: an independent request + its result and UI state. */
 export interface Tab {
   id: string;
+  name: string;
   request: HttpRequest;
   response: HttpResponse | null;
   error: string | null;
@@ -102,6 +103,7 @@ interface State {
   updateTab: (tabId: string, partial: Partial<Omit<Tab, "id">>) => void;
 
   // The request being edited + its result (active tab's live state).
+  requestName: string;
   request: HttpRequest;
   response: HttpResponse | null;
   error: string | null;
@@ -130,6 +132,7 @@ interface State {
 
   // Request editing.
   setRequest: (r: HttpRequest) => void;
+  setRequestName: (name: string) => void;
   patch: (partial: Partial<HttpRequest>) => void;
   newRequest: () => void;
 
@@ -145,7 +148,7 @@ interface State {
   clearHistory: () => Promise<void>;
   loadSaved: (item: SavedRequest) => void;
   loadHistory: (entry: HistoryEntry) => void;
-  loadRequest: (req: HttpRequest) => void;
+  loadRequest: (req: HttpRequest, name?: string) => void;
 
   // Collections.
   refreshCollections: () => Promise<void>;
@@ -174,6 +177,7 @@ interface State {
 
 const freshTab = (): Tab => ({
   id: crypto.randomUUID(),
+  name: "",
   request: defaultRequest(),
   response: null,
   error: null,
@@ -188,6 +192,7 @@ const freshTab = (): Tab => ({
 });
 
 const flatFromTab = (t: Tab) => ({
+  requestName: t.name,
   request: t.request,
   response: t.response,
   error: t.error,
@@ -215,6 +220,7 @@ export const useStore = create<State>((set, get) => {
     const s = get();
     return {
       id: s.activeTabId,
+      name: s.requestName,
       request: s.request,
       response: s.response,
       error: s.error,
@@ -237,7 +243,7 @@ export const useStore = create<State>((set, get) => {
         "pulse.tabs",
         JSON.stringify({
           activeTabId: get().activeTabId,
-          tabs: committed.map((t) => ({ id: t.id, request: t.request, activeId: t.activeId })),
+          tabs: committed.map((t) => ({ id: t.id, name: t.name, request: t.request, activeId: t.activeId })),
         }),
       );
     } catch {
@@ -278,6 +284,7 @@ export const useStore = create<State>((set, get) => {
   sidebarTab: "history",
 
   setRequest: (r) => set({ request: r }),
+  setRequestName: (name) => set({ requestName: name }),
   patch: (partial) => set((s) => ({ request: { ...s.request, ...partial } })),
   newRequest: () => {
     bumpToken(get().activeTabId);
@@ -399,6 +406,7 @@ export const useStore = create<State>((set, get) => {
           const tabs: Tab[] = data.tabs.map((d: any) => ({
             ...freshTab(),
             id: typeof d.id === "string" ? d.id : crypto.randomUUID(),
+            name: typeof d.name === "string" ? d.name : "",
             request: { ...defaultRequest(), ...(d.request || {}) },
             activeId: d.activeId ?? null,
           }));
@@ -452,7 +460,7 @@ export const useStore = create<State>((set, get) => {
       updatedAt: 0,
     };
     const saved = await api.saveRequest(item);
-    set({ activeId: saved.id });
+    set({ activeId: saved.id, requestName: saved.name });
     await get().refreshSaved();
   },
 
@@ -469,7 +477,12 @@ export const useStore = create<State>((set, get) => {
 
   loadSaved: (item) => {
     bumpToken(get().activeTabId);
-    set({ ...flatFromTab(freshTab()), request: structuredClone(item.request), activeId: item.id });
+    set({
+      ...flatFromTab(freshTab()),
+      request: structuredClone(item.request),
+      activeId: item.id,
+      requestName: item.name,
+    });
     persistTabs();
   },
 
@@ -479,9 +492,9 @@ export const useStore = create<State>((set, get) => {
     persistTabs();
   },
 
-  loadRequest: (req) => {
+  loadRequest: (req, name = "") => {
     bumpToken(get().activeTabId);
-    set({ ...flatFromTab(freshTab()), request: structuredClone(req) });
+    set({ ...flatFromTab(freshTab()), request: structuredClone(req), requestName: name });
     persistTabs();
   },
 
