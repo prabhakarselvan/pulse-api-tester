@@ -10,10 +10,10 @@ import {
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useStore, type ImportSummary } from "../store";
-import { readTextFile } from "../lib/api";
+import { readTextFile, fetchText } from "../lib/api";
 import type { Collection, CollectionItem } from "../lib/types";
 import { methodColor } from "../lib/format";
-import { Button, EmptyState, IconButton, Panel, Spinner, cx } from "./ui";
+import { Button, EmptyState, IconButton, Panel, Segmented, Spinner, cx } from "./ui";
 
 function itemMatches(item: CollectionItem, q: string): boolean {
   if (item.kind === "request") {
@@ -226,12 +226,15 @@ function ItemRow({
 
 function ImportModal({ onClose }: { onClose: () => void }) {
   const importPostman = useStore((s) => s.importPostman);
+  const importOpenApi = useStore((s) => s.importOpenApi);
+  const [source, setSource] = useState<"postman" | "openapi">("postman");
   const [text, setText] = useState("");
+  const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [summary, setSummary] = useState<ImportSummary | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
-  const run = async (texts: string[]) => {
+  const runPostman = async (texts: string[]) => {
     setBusy(true);
     setErr(null);
     try {
@@ -243,21 +246,50 @@ function ImportModal({ onClose }: { onClose: () => void }) {
     }
   };
 
+  const runOpenApi = async (texts: string[], hint?: string) => {
+    setBusy(true);
+    setErr(null);
+    try {
+      setSummary(await importOpenApi(texts, hint));
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const chooseFiles = async () => {
     try {
-      const sel = await open({
-        multiple: true,
-        filters: [{ name: "Postman JSON", extensions: ["json"] }],
-      });
+      const filters =
+        source === "postman"
+          ? [{ name: "Postman JSON", extensions: ["json"] }]
+          : [{ name: "OpenAPI / Swagger", extensions: ["json", "yaml", "yml"] }];
+      const sel = await open({ multiple: true, filters });
       if (!sel) return;
       const paths = Array.isArray(sel) ? sel : [sel];
       const texts: string[] = [];
       for (const p of paths) texts.push(await readTextFile(p));
-      await run(texts);
+      if (source === "postman") await runPostman(texts);
+      else await runOpenApi(texts);
     } catch (e) {
       setErr(String(e));
     }
   };
+
+  const fetchSpec = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      const spec = await fetchText(url.trim());
+      setSummary(await importOpenApi([spec], url.trim()));
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const isPostman = source === "postman";
 
   return (
     <div
@@ -267,7 +299,7 @@ function ImportModal({ onClose }: { onClose: () => void }) {
       <Panel className="w-[34rem] max-w-[90vw] p-4 shadow-2xl">
         <div onClick={(e) => e.stopPropagation()} className="space-y-3">
           <div className="text-sm font-semibold text-slate-800 dark:text-slate-100">
-            Import from Postman
+            Import a collection
           </div>
 
           {summary ? (
@@ -291,17 +323,51 @@ function ImportModal({ onClose }: { onClose: () => void }) {
             </div>
           ) : (
             <>
+              <Segmented
+                options={[
+                  { value: "postman", label: "Postman" },
+                  { value: "openapi", label: "OpenAPI / Swagger" },
+                ]}
+                value={source}
+                onChange={(s) => {
+                  setSource(s);
+                  setErr(null);
+                }}
+              />
+
+              {!isPostman && (
+                <div className="flex gap-2">
+                  <input
+                    value={url}
+                    onChange={(e) => {
+                      setUrl(e.target.value);
+                      setErr(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && url.trim()) fetchSpec();
+                    }}
+                    placeholder="https://api.example.com/openapi.json"
+                    spellCheck={false}
+                    className="no-drag min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-xs text-slate-800 outline-none focus:border-indigo-400 dark:border-white/10 dark:bg-white/[0.03] dark:text-slate-100"
+                  />
+                  <Button variant="primary" onClick={fetchSpec} disabled={busy || !url.trim()}>
+                    {busy ? <Spinner className="h-4 w-4" /> : "Fetch"}
+                  </Button>
+                </div>
+              )}
+
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                Select your exported Postman collection / environment file(s) — v2.0 or v2.1. You
-                can pick multiple.
+                {isPostman
+                  ? "Select your exported Postman collection / environment file(s) — v2.0 or v2.1. You can pick multiple."
+                  : "Load an OpenAPI 3.x or Swagger 2.0 spec (JSON or YAML) — by URL above, a file, or pasted below."}
               </p>
-              <Button variant="primary" onClick={chooseFiles} disabled={busy} className="w-full">
+              <Button variant="subtle" onClick={chooseFiles} disabled={busy} className="w-full">
                 {busy ? <Spinner className="h-4 w-4" /> : <Upload size={15} />} Choose file(s)…
               </Button>
 
               <div className="flex items-center gap-2 text-[11px] text-slate-400">
                 <div className="h-px flex-1 bg-slate-200 dark:bg-white/[0.08]" />
-                or paste JSON
+                or paste {isPostman ? "JSON" : "JSON / YAML"}
                 <div className="h-px flex-1 bg-slate-200 dark:bg-white/[0.08]" />
               </div>
 
@@ -311,7 +377,11 @@ function ImportModal({ onClose }: { onClose: () => void }) {
                   setText(e.target.value);
                   setErr(null);
                 }}
-                placeholder='{ "info": { "name": "My API" }, "item": [ … ] }'
+                placeholder={
+                  isPostman
+                    ? '{ "info": { "name": "My API" }, "item": [ … ] }'
+                    : 'openapi: "3.0.0"\ninfo:\n  title: My API\npaths: …'
+                }
                 className="no-drag h-32 w-full resize-none rounded-lg border border-slate-200 bg-white p-2 font-mono text-xs text-slate-800 outline-none focus:border-indigo-400 dark:border-white/10 dark:bg-white/[0.03] dark:text-slate-100"
                 spellCheck={false}
               />
@@ -320,8 +390,12 @@ function ImportModal({ onClose }: { onClose: () => void }) {
                 <Button variant="ghost" onClick={onClose}>
                   Cancel
                 </Button>
-                <Button variant="primary" onClick={() => run([text])} disabled={busy || !text.trim()}>
-                  Import JSON
+                <Button
+                  variant="primary"
+                  onClick={() => (isPostman ? runPostman([text]) : runOpenApi([text]))}
+                  disabled={busy || !text.trim()}
+                >
+                  Import {isPostman ? "JSON" : "spec"}
                 </Button>
               </div>
             </>

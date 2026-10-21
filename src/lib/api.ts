@@ -60,6 +60,10 @@ export const geoLookup = (ip: string) => invoke<string>("geo_lookup", { ip });
 
 export const fetchWsdl = (url: string) => invoke<string>("fetch_wsdl", { url });
 
+// Generic GET-as-text (the fetch_wsdl command is a plain HTTP GET returning the
+// body); reused to fetch OpenAPI specs from a URL.
+export const fetchText = (url: string) => invoke<string>("fetch_wsdl", { url });
+
 // Realtime: WebSocket + SSE streaming over a Tauri Channel.
 export type StreamEvent =
   | {

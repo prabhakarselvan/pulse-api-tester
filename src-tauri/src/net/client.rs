@@ -26,6 +26,8 @@ use url::Url;
 
 /// Max encrypted bytes captured per direction for the raw-wire "Encrypted" view.
 const TLS_TAP_CAP: usize = 16 * 1024;
+/// Max decrypted HTTP/2 frame bytes captured per direction for the frame view.
+const H2_TAP_CAP: usize = 32 * 1024;
 
 const MAX_REDIRECTS: usize = 10;
 /// Cap base64-encoded binary bodies so we don't ship enormous payloads to the UI.
@@ -63,6 +65,10 @@ struct SingleResult {
     tls_rx_b64: String,
     tls_tx_total: u64,
     tls_rx_total: u64,
+    h2_tx_b64: String,
+    h2_rx_b64: String,
+    h2_tx_total: u64,
+    h2_rx_total: u64,
 }
 
 async fn execute_inner(req: HttpRequest) -> anyhow::Result<HttpResponse> {
@@ -183,6 +189,10 @@ async fn execute_inner(req: HttpRequest) -> anyhow::Result<HttpResponse> {
             tls_rx_b64: single.tls_rx_b64,
             tls_tx_total: single.tls_tx_total,
             tls_rx_total: single.tls_rx_total,
+            h2_tx_b64: single.h2_tx_b64,
+            h2_rx_b64: single.h2_rx_b64,
+            h2_tx_total: single.h2_tx_total,
+            h2_rx_total: single.h2_rx_total,
         });
     }
 }
@@ -285,6 +295,7 @@ async fn perform_single(
 
     // --- TLS + HTTP handshake ----------------------------------------------
     let mut tap: Option<(Tap, Tap)> = None;
+    let mut h2_tap: Option<(Tap, Tap)> = None;
     let (parts, resp_body, ttfb_ms, download_ms, tls_info, tls_ms, http_version, sender) = if is_tls
     {
         // Tap the TCP socket underneath TLS so we capture the ciphertext.
@@ -315,9 +326,25 @@ async fn perform_single(
             g.clear();
         }
         tap = Some((tx, rx));
-        let mut sender = establish(TokioIo::new(tls_stream), is_h2)
-            .await
-            .context("HTTP handshake failed")?;
+        // For HTTP/2, add a second tap ABOVE TLS to capture the decrypted h2
+        // frames (connection preface + frames). HTTP/1.1 isn't framed, so skip.
+        let mut sender = if is_h2 {
+            let h2tx: Tap = Arc::new(std::sync::Mutex::new(TapBuf::new(H2_TAP_CAP)));
+            let h2rx: Tap = Arc::new(std::sync::Mutex::new(TapBuf::new(H2_TAP_CAP)));
+            h2_tap = Some((h2tx.clone(), h2rx.clone()));
+            let framed = TappedStream {
+                inner: tls_stream,
+                tx: h2tx,
+                rx: h2rx,
+            };
+            establish(TokioIo::new(framed), true)
+                .await
+                .context("HTTP handshake failed")?
+        } else {
+            establish(TokioIo::new(tls_stream), false)
+                .await
+                .context("HTTP handshake failed")?
+        };
         let hyper_req = build_hyper_request(url, method, headers, body.clone(), is_h2)?;
         let (parts, bytes, ttfb, dl) = send_on_sender(&mut sender, hyper_req).await?;
         let ver = http_version_string(is_h2, &parts.version);
@@ -385,6 +412,14 @@ async fn perform_single(
         result.tls_rx_b64 = rx_b64;
         result.tls_tx_total = tx_total;
         result.tls_rx_total = rx_total;
+    }
+    if let Some((tx, rx)) = h2_tap {
+        let (tx_b64, tx_total) = snapshot_tap(&tx);
+        let (rx_b64, rx_total) = snapshot_tap(&rx);
+        result.h2_tx_b64 = tx_b64;
+        result.h2_rx_b64 = rx_b64;
+        result.h2_tx_total = tx_total;
+        result.h2_rx_total = rx_total;
     }
     Ok(result)
 }
@@ -456,6 +491,10 @@ fn finalize_single(
         tls_rx_b64: String::new(),
         tls_tx_total: 0,
         tls_rx_total: 0,
+        h2_tx_b64: String::new(),
+        h2_rx_b64: String::new(),
+        h2_tx_total: 0,
+        h2_rx_total: 0,
     }
 }
 

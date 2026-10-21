@@ -14,6 +14,7 @@ import type {
 import type { StreamEvent } from "./lib/api";
 import { defaultRequest } from "./lib/samples";
 import { parsePostman } from "./lib/postman";
+import { parseOpenApi } from "./lib/openapi";
 import { runScript, type LogLine, type TestResult } from "./lib/scripting";
 
 export type SidebarTab = "history" | "saved" | "collections";
@@ -72,6 +73,13 @@ export interface ProfileState {
   done: number;
   total: number;
   results: Timings[];
+  concurrency: number;
+  /** Wall-clock elapsed for the run so far, ms. */
+  durationMs: number;
+  /** HTTP status of each successful run. */
+  statuses: number[];
+  /** Count of runs that errored (no response). */
+  errors: number;
 }
 export type Theme = "dark" | "light";
 export type Layout = "horizontal" | "vertical";
@@ -205,6 +213,7 @@ interface State {
   removeCollection: (id: string) => Promise<void>;
   addToCollection: (collectionId: string, name: string) => Promise<void>;
   importPostman: (jsonTexts: string[]) => Promise<ImportSummary>;
+  importOpenApi: (texts: string[], urlHint?: string) => Promise<ImportSummary>;
 
   // Environments.
   refreshEnvs: () => Promise<void>;
@@ -214,7 +223,7 @@ interface State {
   activeVars: () => Record<string, string>;
 
   // Profiler.
-  runProfile: (n: number) => Promise<void>;
+  runProfile: (n: number, concurrency?: number) => Promise<void>;
   clearProfile: () => void;
 
   // UI setters.
@@ -713,6 +722,27 @@ export const useStore = create<State>((set, get) => {
     return { collections, requests, environments };
   },
 
+  importOpenApi: async (texts, urlHint) => {
+    let collections = 0;
+    let requests = 0;
+    const errors: string[] = [];
+    for (const text of texts) {
+      try {
+        const { collection, requestCount } = parseOpenApi(text, urlHint);
+        await api.saveCollection(collection);
+        collections++;
+        requests += requestCount;
+      } catch (e) {
+        errors.push(String(e));
+      }
+    }
+    await get().refreshCollections();
+    if (collections === 0) {
+      throw new Error(errors[0] ?? "No OpenAPI/Swagger spec found in the input.");
+    }
+    return { collections, requests, environments: 0 };
+  },
+
   // --- Environments ---
   refreshEnvs: async () => {
     try {
@@ -794,7 +824,7 @@ export const useStore = create<State>((set, get) => {
   },
 
   // --- Profiler ---
-  runProfile: async (n) => {
+  runProfile: async (n, concurrency = 1) => {
     const { request } = get();
     if (!request.url.trim()) {
       set({ error: "Enter a URL to profile." });
@@ -803,24 +833,64 @@ export const useStore = create<State>((set, get) => {
     const tabId = get().activeTabId;
     const token = bumpToken(tabId);
     const vars = get().activeVars();
+    const conc = Math.max(1, Math.min(concurrency, n));
+
+    const results: Timings[] = [];
+    const statuses: number[] = [];
+    let errors = 0;
+    let done = 0;
+    const start = performance.now();
+    const live = () => reqTokens.get(tabId) === token;
+
+    const snapshot = (running: boolean) =>
+      get().updateTab(tabId, {
+        profile: {
+          running,
+          done,
+          total: n,
+          results: [...results],
+          concurrency: conc,
+          durationMs: performance.now() - start,
+          statuses: [...statuses],
+          errors,
+        },
+      });
+
     get().updateTab(tabId, {
-      profile: { running: true, done: 0, total: n, results: [] },
+      profile: {
+        running: true,
+        done: 0,
+        total: n,
+        results: [],
+        concurrency: conc,
+        durationMs: 0,
+        statuses: [],
+        errors: 0,
+      },
       responseTab: "profile",
     });
-    const results: Timings[] = [];
-    for (let i = 0; i < n; i++) {
-      if (reqTokens.get(tabId) !== token) return; // tab reset/closed — abort
-      try {
-        const r = await api.probeRequest(request, vars);
-        results.push(r.timings);
-      } catch {
-        /* skip failed run */
+
+    // Worker pool: `conc` workers pull from a shared counter until all N done.
+    let next = 0;
+    const worker = async () => {
+      while (live()) {
+        const i = next++;
+        if (i >= n) return;
+        try {
+          const r = await api.probeRequest(request, vars);
+          results.push(r.timings);
+          statuses.push(r.status);
+        } catch {
+          errors++;
+        }
+        done++;
+        if (!live()) return;
+        snapshot(done < n);
       }
-      if (reqTokens.get(tabId) !== token) return;
-      get().updateTab(tabId, {
-        profile: { running: i < n - 1, done: i + 1, total: n, results: [...results] },
-      });
-    }
+    };
+    await Promise.all(Array.from({ length: conc }, () => worker()));
+    if (!live()) return;
+    snapshot(false);
   },
 
   clearProfile: () => set({ profile: null }),

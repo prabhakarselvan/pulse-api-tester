@@ -1,15 +1,51 @@
+import { useState } from "react";
 import { Activity, Play } from "lucide-react";
 import { useStore } from "../store";
 import type { Timings } from "../lib/types";
 import { formatMs } from "../lib/format";
 import { Button, EmptyState, cx } from "./ui";
 
-const RUN_COUNTS = [5, 10, 20, 50];
+const RUN_COUNTS = [10, 25, 50, 100];
+const CONCURRENCY = [1, 4, 8, 16];
 
 function percentile(sorted: number[], p: number): number {
   if (!sorted.length) return 0;
   const idx = Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1);
   return sorted[Math.max(0, idx)];
+}
+
+function Histogram({ values }: { values: number[] }) {
+  if (values.length < 2) return null;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  const bins = 14;
+  const counts = new Array(bins).fill(0);
+  for (const v of values) {
+    const b = Math.min(bins - 1, Math.floor(((v - min) / span) * bins));
+    counts[b]++;
+  }
+  const maxC = Math.max(...counts, 1);
+  return (
+    <div>
+      <div className="flex h-24 items-end gap-0.5">
+        {counts.map((c, i) => (
+          <div
+            key={i}
+            className="flex-1 rounded-t bg-indigo-500/70 transition-all hover:bg-indigo-500"
+            style={{ height: `${Math.max(2, (c / maxC) * 100)}%` }}
+            title={`${formatMs(min + (i / bins) * span)} – ${formatMs(
+              min + ((i + 1) / bins) * span,
+            )}: ${c} run${c === 1 ? "" : "s"}`}
+          />
+        ))}
+      </div>
+      <div className="mt-1 flex justify-between font-mono text-[10px] text-slate-400">
+        <span>{formatMs(min)}</span>
+        <span>{formatMs(max)}</span>
+      </div>
+    </div>
+  );
 }
 
 function Sparkline({ values }: { values: number[] }) {
@@ -62,11 +98,20 @@ const PHASES: { key: keyof Timings; label: string; color: string }[] = [
 export function ProfilePanel() {
   const profile = useStore((s) => s.profile);
   const runProfile = useStore((s) => s.runProfile);
+  const [concurrency, setConcurrency] = useState(1);
 
   const results = profile?.results ?? [];
   const totals = results.map((r) => r.totalMs);
   const sorted = [...totals].sort((a, b) => a - b);
   const avg = totals.length ? totals.reduce((a, b) => a + b, 0) / totals.length : 0;
+  const durationMs = profile?.durationMs ?? 0;
+  const completed = (profile?.done ?? 0);
+  const rps = durationMs > 0 ? (completed / (durationMs / 1000)) : 0;
+  const errors = profile?.errors ?? 0;
+  const statusDist = (profile?.statuses ?? []).reduce(
+    (a, s) => ((a[s] = (a[s] ?? 0) + 1), a),
+    {} as Record<number, number>,
+  );
 
   const avgPhase = (k: keyof Timings) =>
     results.length ? results.reduce((a, r) => a + r[k], 0) / results.length : 0;
@@ -76,48 +121,111 @@ export function ProfilePanel() {
   return (
     <div className="h-full space-y-4 overflow-auto p-4">
       {/* Controls */}
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-xs font-medium text-slate-500 dark:text-slate-400">Run the request</span>
-        {RUN_COUNTS.map((n) => (
-          <Button
-            key={n}
-            variant="subtle"
-            className="px-3 py-1 text-xs"
-            disabled={profile?.running}
-            onClick={() => runProfile(n)}
-          >
-            ×{n}
-          </Button>
-        ))}
-        {profile?.running && (
-          <span className="flex items-center gap-2 text-xs text-slate-500">
-            <Play size={12} className="animate-pulse text-indigo-500" />
-            {profile.done}/{profile.total}
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="w-24 text-xs font-medium text-slate-500 dark:text-slate-400">
+            Concurrency
           </span>
-        )}
+          {CONCURRENCY.map((c) => (
+            <Button
+              key={c}
+              variant={concurrency === c ? "primary" : "subtle"}
+              className="px-3 py-1 text-xs"
+              disabled={profile?.running}
+              onClick={() => setConcurrency(c)}
+            >
+              ×{c}
+            </Button>
+          ))}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="w-24 text-xs font-medium text-slate-500 dark:text-slate-400">
+            Fire requests
+          </span>
+          {RUN_COUNTS.map((n) => (
+            <Button
+              key={n}
+              variant="subtle"
+              className="px-3 py-1 text-xs"
+              disabled={profile?.running}
+              onClick={() => runProfile(n, concurrency)}
+            >
+              ×{n}
+            </Button>
+          ))}
+          {profile?.running && (
+            <span className="flex items-center gap-2 text-xs text-slate-500">
+              <Play size={12} className="animate-pulse text-indigo-500" />
+              {profile.done}/{profile.total}
+            </span>
+          )}
+        </div>
       </div>
 
       {results.length === 0 && !profile?.running && (
         <EmptyState
           icon={<Activity size={36} strokeWidth={1.3} />}
-          title="Latency profiler"
-          subtitle="Fire the current request multiple times to see its timing distribution (p50 / p95) and average per-phase breakdown."
+          title="Load tester"
+          subtitle="Fire the current request N times (optionally concurrent) to see its latency distribution (p50 / p95 / p99), throughput, a histogram, and the per-phase breakdown."
         />
       )}
 
       {results.length > 0 && (
         <>
-          <div className="grid grid-cols-3 gap-2 sm:grid-cols-5">
+          <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
             <Stat label="p50" value={formatMs(percentile(sorted, 50))} accent />
+            <Stat label="p90" value={formatMs(percentile(sorted, 90))} accent />
             <Stat label="p95" value={formatMs(percentile(sorted, 95))} accent />
+            <Stat label="p99" value={formatMs(percentile(sorted, 99))} accent />
             <Stat label="min" value={formatMs(sorted[0] ?? 0)} />
             <Stat label="max" value={formatMs(sorted[sorted.length - 1] ?? 0)} />
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
             <Stat label="avg" value={formatMs(avg)} />
+            <Stat label="throughput" value={`${rps.toFixed(1)}/s`} accent />
+            <Stat label="wall time" value={formatMs(durationMs)} />
+            <Stat
+              label="success"
+              value={`${results.length}/${(profile?.total ?? 0)}${errors ? ` · ${errors} err` : ""}`}
+            />
+          </div>
+
+          {Object.keys(statusDist).length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {Object.entries(statusDist)
+                .sort((a, b) => Number(a[0]) - Number(b[0]))
+                .map(([code, count]) => (
+                  <span
+                    key={code}
+                    className={cx(
+                      "rounded px-2 py-0.5 font-mono text-[11px]",
+                      Number(code) < 400
+                        ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-300"
+                        : "bg-rose-500/15 text-rose-500",
+                    )}
+                  >
+                    {code} ×{count}
+                  </span>
+                ))}
+              {errors > 0 && (
+                <span className="rounded bg-rose-500/15 px-2 py-0.5 font-mono text-[11px] text-rose-500">
+                  error ×{errors}
+                </span>
+              )}
+            </div>
+          )}
+
+          <div className="rounded-xl border border-slate-200 bg-white p-3 dark:border-white/[0.08] dark:bg-[#0f131c]">
+            <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+              Latency distribution ({results.length} runs)
+            </div>
+            <Histogram values={totals} />
           </div>
 
           <div className="rounded-xl border border-slate-200 bg-white p-3 dark:border-white/[0.08] dark:bg-[#0f131c]">
             <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-              Per-run total ({results.length} runs)
+              Per-run total (in order)
             </div>
             <Sparkline values={totals} />
           </div>

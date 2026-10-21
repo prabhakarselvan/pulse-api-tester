@@ -23,6 +23,26 @@ function header(headers: KeyValue[], name: string): string | undefined {
   return headers.find((h) => h.key.toLowerCase() === lower)?.value;
 }
 
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+/** Does a certificate SAN entry (possibly a wildcard) cover `host`? */
+function sanMatches(san: string, host: string): boolean {
+  const s = san.toLowerCase();
+  if (s === host) return true;
+  if (s.startsWith("*.")) {
+    const suffix = s.slice(1); // ".example.com"
+    // A wildcard matches exactly one left-most label.
+    return host.endsWith(suffix) && host.slice(0, host.length - suffix.length).indexOf(".") === -1;
+  }
+  return false;
+}
+
 function parseCookies(headers: KeyValue[]) {
   return headers
     .filter((h) => h.key.toLowerCase() === "set-cookie")
@@ -90,6 +110,19 @@ export function analyzeSecurity(res: HttpResponse): SecurityReport {
     });
   }
 
+  // --- Forward secrecy ---
+  if (tls && tls.version) {
+    const pfs = tls.version.includes("1.3") || /ECDHE|DHE/i.test(tls.cipherSuite ?? "");
+    checks.push({
+      id: "pfs",
+      label: "Forward secrecy",
+      status: pfs ? "pass" : "warn",
+      detail: pfs
+        ? "The key exchange provides forward secrecy — a future key compromise can't decrypt past traffic."
+        : "No forward secrecy detected — recorded traffic could be decrypted if the server key is later compromised.",
+    });
+  }
+
   // --- Certificate expiry (leaf cert) ---
   const leaf = tls?.certificates?.[0];
   if (leaf?.notAfterTs != null) {
@@ -104,6 +137,54 @@ export function analyzeSecurity(res: HttpResponse): SecurityReport {
       detail = `Certificate expires soon — in ${days} day${days === 1 ? "" : "s"}.`;
     }
     checks.push({ id: "cert-expiry", label: "Certificate validity", status, detail });
+  }
+
+  // --- Certificate chain / trust path ---
+  if (tls?.certificates?.length) {
+    const chain = tls.certificates;
+    const n = chain.length;
+    const selfSigned = n === 1 && !!leaf && leaf.subject === leaf.issuer && leaf.subject !== "";
+    checks.push({
+      id: "cert-chain",
+      label: "Certificate chain",
+      status: selfSigned ? "warn" : n >= 2 ? "pass" : "info",
+      detail: selfSigned
+        ? "Self-signed certificate — not anchored to a public CA."
+        : n >= 2
+          ? `${n} certificates presented (leaf + ${n - 1} intermediate${n - 1 === 1 ? "" : "s"}).`
+          : "Only the leaf certificate was presented; intermediates may be inferred by the client.",
+    });
+  }
+
+  // --- SAN / hostname coverage ---
+  const host = hostOf(res.finalUrl);
+  if (leaf && host) {
+    const names = leaf.san.length ? leaf.san : [];
+    const covered = names.some((s) => sanMatches(s, host));
+    checks.push({
+      id: "cert-host",
+      label: "Hostname coverage",
+      status: covered ? "pass" : "warn",
+      detail: covered
+        ? `The certificate's SAN covers ${host}.`
+        : names.length
+          ? `${host} is not listed in the certificate SAN (${names.slice(0, 4).join(", ")}${names.length > 4 ? "…" : ""}).`
+          : "The certificate has no Subject Alternative Names.",
+    });
+  }
+
+  // --- Signature algorithm ---
+  if (leaf?.signatureAlgorithm) {
+    const sa = leaf.signatureAlgorithm.toUpperCase();
+    const weak = sa.includes("SHA1") || sa.includes("MD5");
+    checks.push({
+      id: "cert-sig",
+      label: `Signature — ${leaf.signatureAlgorithm}`,
+      status: weak ? "fail" : "pass",
+      detail: weak
+        ? "Signed with a broken hash (SHA-1/MD5) — forgeable and distrusted by browsers."
+        : "Signed with a strong hash algorithm.",
+    });
   }
 
   // --- HTTP version ---
@@ -122,14 +203,30 @@ export function analyzeSecurity(res: HttpResponse): SecurityReport {
 
   // --- Security headers (only meaningful over HTTPS) ---
   const hsts = header(h, "strict-transport-security");
-  checks.push({
-    id: "hsts",
-    label: "HSTS (Strict-Transport-Security)",
-    status: hsts ? "pass" : isHttps ? "warn" : "info",
-    detail: hsts
-      ? `Present: ${hsts}`
-      : "Missing — browsers won't be forced to use HTTPS on future visits.",
-  });
+  if (hsts) {
+    const maxAge = Number(hsts.match(/max-age=(\d+)/i)?.[1] ?? "0");
+    const months = Math.floor(maxAge / 2_592_000);
+    const weak = maxAge < 15_552_000; // < 180 days
+    const extras = [
+      /includesubdomains/i.test(hsts) ? "includeSubDomains" : null,
+      /preload/i.test(hsts) ? "preload" : null,
+    ].filter(Boolean);
+    checks.push({
+      id: "hsts",
+      label: "HSTS (Strict-Transport-Security)",
+      status: weak ? "warn" : "pass",
+      detail: `max-age ≈ ${months} month${months === 1 ? "" : "s"}${
+        extras.length ? ` · ${extras.join(", ")}` : ""
+      }${weak ? " — consider at least 180 days." : "."}`,
+    });
+  } else {
+    checks.push({
+      id: "hsts",
+      label: "HSTS (Strict-Transport-Security)",
+      status: isHttps ? "warn" : "info",
+      detail: "Missing — browsers won't be forced to use HTTPS on future visits.",
+    });
+  }
 
   const csp = header(h, "content-security-policy");
   checks.push({

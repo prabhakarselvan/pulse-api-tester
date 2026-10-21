@@ -325,6 +325,17 @@ pub struct HttpResponse {
     /// Total bytes read from the socket (may exceed the captured sample).
     #[serde(default)]
     pub tls_rx_total: u64,
+    /// Base64 of the decrypted HTTP/2 frames SENT (preface + frames). Empty
+    /// unless HTTP/2 was negotiated on a fresh connection. Capped.
+    #[serde(default)]
+    pub h2_tx_b64: String,
+    /// Base64 of the decrypted HTTP/2 frames RECEIVED. Capped.
+    #[serde(default)]
+    pub h2_rx_b64: String,
+    #[serde(default)]
+    pub h2_tx_total: u64,
+    #[serde(default)]
+    pub h2_rx_total: u64,
 }
 
 /// A saved/named request stored in a collection.
