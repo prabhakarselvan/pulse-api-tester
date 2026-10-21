@@ -16,7 +16,7 @@ use rustls_pki_types::{
 };
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
 
@@ -65,20 +65,23 @@ fn make_config(verify: bool, client_auth: Option<ClientAuth>) -> anyhow::Result<
 
 /// Perform the TLS handshake and extract connection detail.
 /// Returns the stream, the parsed `TlsInfo`, and whether HTTP/2 was negotiated.
-pub async fn handshake(
-    tcp: TcpStream,
+pub async fn handshake<IO>(
+    io: IO,
     host: &str,
     verify: bool,
     client_cert_pem: &str,
     client_key_pem: &str,
-) -> anyhow::Result<(TlsStream<TcpStream>, TlsInfo, bool)> {
+) -> anyhow::Result<(TlsStream<IO>, TlsInfo, bool)>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
     let client_auth = parse_client_auth(client_cert_pem, client_key_pem)?;
     let connector = TlsConnector::from(make_config(verify, client_auth)?);
     let server_name = ServerName::try_from(host.to_string())
         .map_err(|_| anyhow::anyhow!("invalid server name for TLS: {host}"))?;
 
     let tls = connector
-        .connect(server_name, tcp)
+        .connect(server_name, io)
         .await
         .context("TLS handshake failed")?;
 

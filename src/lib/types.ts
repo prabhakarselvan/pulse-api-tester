@@ -151,6 +151,10 @@ export interface HttpResponse {
   bodySizeBytes: number;
   rawRequest: string;
   rawResponseHead: string;
+  tlsTxB64: string;
+  tlsRxB64: string;
+  tlsTxTotal: number;
+  tlsRxTotal: number;
 }
 
 export interface SavedRequest {

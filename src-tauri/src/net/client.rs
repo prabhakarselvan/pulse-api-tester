@@ -15,12 +15,17 @@ use hyper::Request;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::OnceLock;
+use std::pin::Pin;
+use std::sync::{Arc, OnceLock};
+use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use url::Url;
+
+/// Max encrypted bytes captured per direction for the raw-wire "Encrypted" view.
+const TLS_TAP_CAP: usize = 16 * 1024;
 
 const MAX_REDIRECTS: usize = 10;
 /// Cap base64-encoded binary bodies so we don't ship enormous payloads to the UI.
@@ -54,6 +59,10 @@ struct SingleResult {
     network: NetworkInfo,
     raw_request: String,
     raw_response_head: String,
+    tls_tx_b64: String,
+    tls_rx_b64: String,
+    tls_tx_total: u64,
+    tls_rx_total: u64,
 }
 
 async fn execute_inner(req: HttpRequest) -> anyhow::Result<HttpResponse> {
@@ -170,6 +179,10 @@ async fn execute_inner(req: HttpRequest) -> anyhow::Result<HttpResponse> {
             body_size_bytes,
             raw_request: single.raw_request,
             raw_response_head: single.raw_response_head,
+            tls_tx_b64: single.tls_tx_b64,
+            tls_rx_b64: single.tls_rx_b64,
+            tls_tx_total: single.tls_tx_total,
+            tls_rx_total: single.tls_rx_total,
         });
     }
 }
@@ -271,11 +284,20 @@ async fn perform_single(
     let remote_addr = tcp.peer_addr().ok().map(|a| a.to_string());
 
     // --- TLS + HTTP handshake ----------------------------------------------
+    let mut tap: Option<(Tap, Tap)> = None;
     let (parts, resp_body, ttfb_ms, download_ms, tls_info, tls_ms, http_version, sender) = if is_tls
     {
+        // Tap the TCP socket underneath TLS so we capture the ciphertext.
+        let tx: Tap = Arc::new(std::sync::Mutex::new(TapBuf::new(TLS_TAP_CAP)));
+        let rx: Tap = Arc::new(std::sync::Mutex::new(TapBuf::new(TLS_TAP_CAP)));
+        let tapped = TappedStream {
+            inner: tcp,
+            tx: tx.clone(),
+            rx: rx.clone(),
+        };
         let tls_start = Instant::now();
         let (tls_stream, tls_info, is_h2) = tls::handshake(
-            tcp,
+            tapped,
             &host,
             req.verify_tls,
             &req.client_cert_pem,
@@ -284,6 +306,15 @@ async fn perform_single(
         .await
         .context("TLS handshake failed")?;
         let tls_ms = ms(tls_start.elapsed());
+        // Drop the handshake records — from here the tap holds only the
+        // application data encrypted under the negotiated cipher suite.
+        if let Ok(mut g) = tx.lock() {
+            g.clear();
+        }
+        if let Ok(mut g) = rx.lock() {
+            g.clear();
+        }
+        tap = Some((tx, rx));
         let mut sender = establish(TokioIo::new(tls_stream), is_h2)
             .await
             .context("HTTP handshake failed")?;
@@ -335,7 +366,7 @@ async fn perform_single(
         .await;
     }
 
-    Ok(finalize_single(
+    let mut result = finalize_single(
         parts,
         resp_body,
         timings,
@@ -346,7 +377,16 @@ async fn perform_single(
         scheme,
         raw_request,
         raw_response_head,
-    ))
+    );
+    if let Some((tx, rx)) = tap {
+        let (tx_b64, tx_total) = snapshot_tap(&tx);
+        let (rx_b64, rx_total) = snapshot_tap(&rx);
+        result.tls_tx_b64 = tx_b64;
+        result.tls_rx_b64 = rx_b64;
+        result.tls_tx_total = tx_total;
+        result.tls_rx_total = rx_total;
+    }
+    Ok(result)
 }
 
 /// Parse `parts` + body into a `SingleResult`, shared by the fresh and the
@@ -412,6 +452,10 @@ fn finalize_single(
         network,
         raw_request,
         raw_response_head,
+        tls_tx_b64: String::new(),
+        tls_rx_b64: String::new(),
+        tls_tx_total: 0,
+        tls_rx_total: 0,
     }
 }
 
@@ -543,6 +587,107 @@ async fn ready_sender(sender: &mut PooledSender) -> bool {
     match sender {
         PooledSender::H1(s) => s.ready().await.is_ok(),
         PooledSender::H2(s) => s.ready().await.is_ok(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Socket tap — records the raw (encrypted) bytes crossing the TCP socket
+// underneath TLS, so the UI can show the ciphertext on the wire.
+// ---------------------------------------------------------------------------
+
+/// A capped byte recorder: keeps the first `cap` bytes plus a running total.
+struct TapBuf {
+    data: Vec<u8>,
+    total: u64,
+    cap: usize,
+}
+
+impl TapBuf {
+    fn new(cap: usize) -> Self {
+        TapBuf {
+            data: Vec::new(),
+            total: 0,
+            cap,
+        }
+    }
+    fn record(&mut self, bytes: &[u8]) {
+        self.total += bytes.len() as u64;
+        if self.data.len() < self.cap {
+            let take = (self.cap - self.data.len()).min(bytes.len());
+            self.data.extend_from_slice(&bytes[..take]);
+        }
+    }
+    fn clear(&mut self) {
+        self.data.clear();
+        self.total = 0;
+    }
+}
+
+type Tap = Arc<std::sync::Mutex<TapBuf>>;
+
+fn snapshot_tap(tap: &Tap) -> (String, u64) {
+    match tap.lock() {
+        Ok(g) => (
+            base64::engine::general_purpose::STANDARD.encode(&g.data),
+            g.total,
+        ),
+        Err(_) => (String::new(), 0),
+    }
+}
+
+/// Wraps an IO and tees every byte written (`tx`) and read (`rx`) into tap
+/// buffers. Placed under TLS, so it records the encrypted records on the wire.
+struct TappedStream<S> {
+    inner: S,
+    tx: Tap,
+    rx: Tap,
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for TappedStream<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let me = self.get_mut();
+        let before = buf.filled().len();
+        let r = Pin::new(&mut me.inner).poll_read(cx, buf);
+        if let Poll::Ready(Ok(())) = &r {
+            let fresh = &buf.filled()[before..];
+            if !fresh.is_empty() {
+                if let Ok(mut g) = me.rx.lock() {
+                    g.record(fresh);
+                }
+            }
+        }
+        r
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for TappedStream<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        data: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let me = self.get_mut();
+        let r = Pin::new(&mut me.inner).poll_write(cx, data);
+        if let Poll::Ready(Ok(n)) = &r {
+            if *n > 0 {
+                if let Ok(mut g) = me.tx.lock() {
+                    g.record(&data[..*n]);
+                }
+            }
+        }
+        r
+    }
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        let me = self.get_mut();
+        Pin::new(&mut me.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        let me = self.get_mut();
+        Pin::new(&mut me.inner).poll_shutdown(cx)
     }
 }
 

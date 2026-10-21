@@ -1,7 +1,37 @@
-import { useState } from "react";
-import { Check, Copy } from "lucide-react";
+import { useMemo, useState } from "react";
+import { Check, Copy, Lock, ShieldOff } from "lucide-react";
 import type { HttpResponse } from "../lib/types";
-import { IconButton } from "./ui";
+import { formatBytes } from "../lib/format";
+import { EmptyState, IconButton, Segmented, cx, type SegOption } from "./ui";
+
+type WireView = "decoded" | "encrypted";
+
+export function WirePanel({ res }: { res: HttpResponse }) {
+  const [view, setView] = useState<WireView>("decoded");
+  const views: SegOption<WireView>[] = [
+    { value: "decoded", label: "Decoded" },
+    { value: "encrypted", label: "Encrypted (on the wire)" },
+  ];
+
+  const responseText =
+    res.rawResponseHead +
+    "\r\n" +
+    (res.body || (res.bodyBase64 ? `<${res.bodySizeBytes} bytes of binary data>` : ""));
+
+  return (
+    <div className="flex h-full flex-col gap-2 p-3">
+      <Segmented options={views} value={view} onChange={setView} />
+      {view === "decoded" ? (
+        <div className="flex min-h-0 flex-1 flex-col gap-3">
+          <RawBlock title="Request" text={res.rawRequest} />
+          <RawBlock title="Response" text={responseText} />
+        </div>
+      ) : (
+        <EncryptedView res={res} />
+      )}
+    </div>
+  );
+}
 
 function RawBlock({ title, text }: { title: string; text: string }) {
   const [copied, setCopied] = useState(false);
@@ -31,16 +61,189 @@ function RawBlock({ title, text }: { title: string; text: string }) {
   );
 }
 
-export function WirePanel({ res }: { res: HttpResponse }) {
-  const responseText =
-    res.rawResponseHead +
-    "\r\n" +
-    (res.body || (res.bodyBase64 ? `<${res.bodySizeBytes} bytes of binary data>` : ""));
+function EncryptedView({ res }: { res: HttpResponse }) {
+  const tls = res.network.tls;
+
+  if (!tls) {
+    return (
+      <EmptyState
+        icon={<ShieldOff size={40} strokeWidth={1.3} />}
+        title="No TLS — traffic is plaintext"
+        subtitle="This request used plain HTTP, so there is no encryption layer. The bytes on the wire are exactly the decoded request/response."
+      />
+    );
+  }
+
+  const captured = res.tlsTxB64 || res.tlsRxB64;
+  if (!captured) {
+    return (
+      <EmptyState
+        icon={<Lock size={40} strokeWidth={1.3} />}
+        title="Ciphertext not captured"
+        subtitle="Encrypted bytes are recorded during a fresh TLS handshake. This request reused a pooled keep-alive connection, so turn off Keep-alive to capture the wire ciphertext."
+      />
+    );
+  }
 
   return (
-    <div className="flex h-full flex-col gap-3 overflow-hidden p-3">
-      <RawBlock title="Request" text={res.rawRequest} />
-      <RawBlock title="Response" text={responseText} />
+    <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto">
+      <div className="flex items-center gap-2 rounded-lg border border-emerald-300/50 bg-emerald-50 px-3 py-2 dark:border-emerald-500/20 dark:bg-emerald-500/10">
+        <Lock size={13} className="shrink-0 text-emerald-500" />
+        <span className="text-[11px] text-emerald-700 dark:text-emerald-300">
+          Application data encrypted under{" "}
+          <span className="font-mono font-semibold">{tls.version || "TLS"}</span>
+          {tls.cipherSuite && (
+            <>
+              {" · "}
+              <span className="font-mono font-semibold">{tls.cipherSuite}</span>
+            </>
+          )}
+          . These are the TLS records after the handshake — the ciphertext a network
+          sniffer would see.
+        </span>
+      </div>
+      <EncBlock title="Sent — encrypted request" b64={res.tlsTxB64} total={res.tlsTxTotal} />
+      <EncBlock title="Received — encrypted response" b64={res.tlsRxB64} total={res.tlsRxTotal} />
+    </div>
+  );
+}
+
+const RECORD_NAMES: Record<number, string> = {
+  20: "change_cipher_spec",
+  21: "alert",
+  22: "handshake",
+  23: "application_data",
+  24: "heartbeat",
+};
+
+interface TlsRecord {
+  type: number;
+  name: string;
+  length: number;
+}
+
+function parseTlsRecords(bytes: Uint8Array): TlsRecord[] {
+  const recs: TlsRecord[] = [];
+  let i = 0;
+  while (i + 5 <= bytes.length) {
+    const type = bytes[i];
+    const major = bytes[i + 1];
+    // Valid TLS record: content type 20–24, legacy_record_version major == 3.
+    if (type < 20 || type > 24 || major !== 3) break;
+    const len = (bytes[i + 3] << 8) | bytes[i + 4];
+    recs.push({ type, name: RECORD_NAMES[type] ?? `0x${type.toString(16)}`, length: len });
+    i += 5 + len;
+    if (recs.length > 4096) break;
+  }
+  return recs;
+}
+
+function b64ToBytes(b64: string): Uint8Array {
+  if (!b64) return new Uint8Array(0);
+  try {
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  } catch {
+    return new Uint8Array(0);
+  }
+}
+
+function hexDump(bytes: Uint8Array): string {
+  const lines: string[] = [];
+  for (let off = 0; off < bytes.length; off += 16) {
+    let hex = "";
+    let ascii = "";
+    for (let j = off; j < off + 16; j++) {
+      if (j < bytes.length) {
+        hex += bytes[j].toString(16).padStart(2, "0") + " ";
+        const c = bytes[j];
+        ascii += c >= 0x20 && c < 0x7f ? String.fromCharCode(c) : ".";
+      } else {
+        hex += "   ";
+      }
+      if (j === off + 7) hex += " ";
+    }
+    lines.push(`${off.toString(16).padStart(8, "0")}  ${hex} |${ascii}|`);
+  }
+  return lines.join("\n");
+}
+
+function EncBlock({ title, b64, total }: { title: string; b64: string; total: number }) {
+  const bytes = useMemo(() => b64ToBytes(b64), [b64]);
+  const records = useMemo(() => parseTlsRecords(bytes), [bytes]);
+  const dump = useMemo(() => hexDump(bytes), [bytes]);
+  const [copied, setCopied] = useState(false);
+
+  const appData = records.filter((r) => r.type === 23);
+  const appBytes = appData.reduce((a, r) => a + r.length, 0);
+  const truncated = total > bytes.length;
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(dump);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      /* clipboard unavailable */
+    }
+  };
+
+  if (!b64) {
+    return (
+      <div className="flex min-h-0 flex-col">
+        <span className="px-1 pb-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+          {title}
+        </span>
+        <div className="rounded-lg border border-slate-200 p-3 text-[11px] text-slate-400 dark:border-white/[0.08]">
+          No bytes captured in this direction.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex min-h-0 flex-col">
+      <div className="flex items-center justify-between px-1 pb-1">
+        <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+          {title}
+        </span>
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-[10px] text-slate-400">
+            {records.length} record{records.length === 1 ? "" : "s"}
+            {appData.length > 0 && ` · ${formatBytes(appBytes)} app-data`}
+            {truncated && ` · first ${formatBytes(bytes.length)} of ${formatBytes(total)}`}
+          </span>
+          <IconButton onClick={copy} aria-label="Copy hex">
+            {copied ? <Check size={13} className="text-emerald-500" /> : <Copy size={13} />}
+          </IconButton>
+        </div>
+      </div>
+      {records.length > 0 && (
+        <div className="mb-1 flex flex-wrap gap-1 px-1">
+          {records.slice(0, 24).map((r, i) => (
+            <span
+              key={i}
+              className={cx(
+                "rounded px-1.5 py-0.5 font-mono text-[9px]",
+                r.type === 23
+                  ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-300"
+                  : "bg-slate-200 text-slate-500 dark:bg-white/10 dark:text-slate-400",
+              )}
+              title={`TLS record: ${r.name}, ${r.length} bytes`}
+            >
+              {r.name} · {r.length}
+            </span>
+          ))}
+          {records.length > 24 && (
+            <span className="px-1 py-0.5 text-[9px] text-slate-400">+{records.length - 24} more</span>
+          )}
+        </div>
+      )}
+      <pre className="max-h-64 overflow-auto rounded-lg border border-slate-200 bg-white p-3 font-mono text-[11px] leading-relaxed text-slate-700 dark:border-white/[0.08] dark:bg-[#0f131c] dark:text-slate-300">
+        {dump || "—"}
+      </pre>
     </div>
   );
 }

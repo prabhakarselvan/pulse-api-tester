@@ -311,6 +311,20 @@ pub struct HttpResponse {
     /// Reconstructed raw HTTP response head (status line + headers).
     #[serde(default)]
     pub raw_response_head: String,
+    /// Base64 of the encrypted bytes we WROTE to the socket (TLS records:
+    /// handshake + encrypted request). Capped; empty for non-TLS or reused conns.
+    #[serde(default)]
+    pub tls_tx_b64: String,
+    /// Base64 of the encrypted bytes we READ from the socket (TLS records:
+    /// handshake + encrypted response). Capped; empty for non-TLS or reused conns.
+    #[serde(default)]
+    pub tls_rx_b64: String,
+    /// Total bytes written to the socket (may exceed the captured sample).
+    #[serde(default)]
+    pub tls_tx_total: u64,
+    /// Total bytes read from the socket (may exceed the captured sample).
+    #[serde(default)]
+    pub tls_rx_total: u64,
 }
 
 /// A saved/named request stored in a collection.
