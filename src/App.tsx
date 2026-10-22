@@ -5,6 +5,7 @@ import { Sidebar } from "./components/Sidebar";
 import { RequestPanel } from "./components/RequestPanel";
 import { ResponsePanel } from "./components/ResponsePanel";
 import { RealtimePanel } from "./components/RealtimePanel";
+import { RunnerModal } from "./components/RunnerModal";
 import { TabBar } from "./components/TabBar";
 import { cx } from "./components/ui";
 
@@ -35,6 +36,13 @@ export default function App() {
   useEffect(() => {
     init();
   }, [init]);
+
+  // Poll endpoint monitors while the app is open.
+  useEffect(() => {
+    const tick = () => useStore.getState().tickMonitors();
+    const id = setInterval(tick, 15_000);
+    return () => clearInterval(id);
+  }, []);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -162,6 +170,7 @@ export default function App() {
           </div>
         </div>
       </div>
+      <RunnerModal />
     </div>
   );
 }

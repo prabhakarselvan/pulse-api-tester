@@ -4,6 +4,7 @@ import {
   ChevronRight,
   Folder,
   FolderPlus,
+  Play,
   Plus,
   Trash2,
   Upload,
@@ -115,6 +116,7 @@ function CollectionRow({
   const [adding, setAdding] = useState(false);
   const removeCollection = useStore((s) => s.removeCollection);
   const addToCollection = useStore((s) => s.addToCollection);
+  const runCollection = useStore((s) => s.runCollection);
 
   // Guard against a double-click lost update (serialize read-modify-write).
   const add = async () => {
@@ -143,6 +145,13 @@ function CollectionRow({
             {countRequests(collection.items)}
           </span>
         </button>
+        <IconButton
+          onClick={() => runCollection(collection.id)}
+          title="Run collection (chained)"
+          className="opacity-0 group-hover:opacity-100"
+        >
+          <Play size={13} />
+        </IconButton>
         <IconButton
           onClick={add}
           disabled={adding}

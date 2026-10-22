@@ -3,6 +3,7 @@ import { useStore, type SidebarTab } from "../store";
 import { methodColor, statusColor, timeAgo } from "../lib/format";
 import { SAMPLES } from "../lib/samples";
 import { CollectionsPanel } from "./CollectionsPanel";
+import { MonitorsPanel } from "./MonitorsPanel";
 import { IconButton, Segmented, cx, type SegOption } from "./ui";
 
 export function Sidebar() {
@@ -15,6 +16,7 @@ export function Sidebar() {
     { value: "history", label: "History" },
     { value: "saved", label: "Saved" },
     { value: "collections", label: "Collections" },
+    { value: "monitors", label: "Monitors" },
   ];
 
   return (
@@ -27,7 +29,7 @@ export function Sidebar() {
           className="w-full [&>button]:flex-1 [&>button]:justify-center [&>button]:px-2"
         />
       </div>
-      <div className="px-2 pb-2">
+      <div className={cx("px-2 pb-2", sidebarTab === "monitors" && "hidden")}>
         <div className="relative">
           <Search
             size={13}
@@ -54,6 +56,7 @@ export function Sidebar() {
         {sidebarTab === "history" && <HistoryList />}
         {sidebarTab === "saved" && <SavedList />}
         {sidebarTab === "collections" && <CollectionsPanel />}
+        {sidebarTab === "monitors" && <MonitorsPanel />}
       </div>
     </aside>
   );

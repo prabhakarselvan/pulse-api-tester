@@ -16,6 +16,7 @@ import { NetworkPanel } from "./NetworkPanel";
 import { FlowPanel } from "./FlowPanel";
 import { WirePanel } from "./WirePanel";
 import { DiffPanel } from "./DiffPanel";
+import { JsonTree } from "./JsonTree";
 import { SecurityPanel } from "./SecurityPanel";
 import { ProfilePanel } from "./ProfilePanel";
 import { TestsPanel } from "./TestsPanel";
@@ -156,25 +157,30 @@ function ResponseBody({ res }: { res: HttpResponse }) {
     { value: "raw", label: "Raw" },
     { value: "preview", label: "Preview" },
   ];
+  if (lang === "json") views.splice(1, 0, { value: "tree", label: "Tree" });
 
   const empty = !res.body && !res.bodyBase64;
   const fault = useMemo(() => parseSoapFault(res.body), [res.body]);
+  // If "tree" was selected on a prior JSON response but this one isn't JSON, fall back.
+  const effectiveView: BodyView = bodyView === "tree" && lang !== "json" ? "pretty" : bodyView;
 
   return (
     <div className="flex h-full flex-col gap-2 px-3 pb-3">
       {fault && <SoapFaultBanner fault={fault} />}
-      <Segmented options={views} value={bodyView} onChange={setBodyView} />
+      <Segmented options={views} value={effectiveView} onChange={setBodyView} />
       <div className="min-h-0 flex-1">
         {empty ? (
           <EmptyState title="Empty body" subtitle="The response had no body." />
-        ) : bodyView === "preview" ? (
+        ) : effectiveView === "tree" ? (
+          <JsonTree text={res.body} />
+        ) : effectiveView === "preview" ? (
           <Preview res={res} isImage={isImage} lang={lang} />
         ) : (
           <Panel className="h-full overflow-hidden">
             <CodeEditor
               readOnly
-              value={bodyView === "pretty" ? maybePretty(res.body, lang) : res.body}
-              lang={bodyView === "pretty" ? lang : "text"}
+              value={effectiveView === "pretty" ? maybePretty(res.body, lang) : res.body}
+              lang={effectiveView === "pretty" ? lang : "text"}
             />
           </Panel>
         )}

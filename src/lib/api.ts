@@ -12,17 +12,27 @@ import type {
   SavedRequest,
   Timings,
 } from "./types";
+import { injectDynamicVars } from "./dynamic";
 
 export const sendRequest = (
   request: HttpRequest,
   variables?: Record<string, string>,
   historyRequest?: HttpRequest,
-) => invoke<HttpResponse>("send_request", { request, variables, historyRequest });
+) =>
+  invoke<HttpResponse>("send_request", {
+    request,
+    variables: injectDynamicVars(request, variables),
+    historyRequest,
+  });
 
 export const probeRequest = (
   request: HttpRequest,
   variables?: Record<string, string>,
-) => invoke<HttpResponse>("probe_request", { request, variables });
+) =>
+  invoke<HttpResponse>("probe_request", {
+    request,
+    variables: injectDynamicVars(request, variables),
+  });
 
 export const saveRequest = (item: SavedRequest) =>
   invoke<SavedRequest>("save_request", { item });

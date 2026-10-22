@@ -17,7 +17,7 @@ import { parsePostman } from "./lib/postman";
 import { parseOpenApi } from "./lib/openapi";
 import { runScript, type LogLine, type TestResult } from "./lib/scripting";
 
-export type SidebarTab = "history" | "saved" | "collections";
+export type SidebarTab = "history" | "saved" | "collections" | "monitors";
 
 export interface ImportSummary {
   collections: number;
@@ -42,7 +42,7 @@ export type ResponseTab =
   | "security"
   | "profile"
   | "tests";
-export type BodyView = "pretty" | "raw" | "preview";
+export type BodyView = "pretty" | "raw" | "preview" | "tree";
 
 /** Protocol the request builder is driving. */
 export type RequestMode = "http" | "ws" | "sse";
@@ -83,6 +83,45 @@ export interface ProfileState {
 }
 export type Theme = "dark" | "light";
 export type Layout = "horizontal" | "vertical";
+
+/** One request's outcome within a collection run. */
+export interface RunnerResult {
+  id: string;
+  name: string;
+  method: string;
+  status?: number;
+  ok: boolean;
+  timeMs: number;
+  testsPassed: number;
+  testsFailed: number;
+  error?: string;
+}
+
+/** State of an in-progress / completed collection run. */
+export interface RunnerState {
+  collectionName: string;
+  running: boolean;
+  total: number;
+  done: number;
+  results: RunnerResult[];
+}
+
+/** A monitored endpoint, polled while the app is open. */
+export interface Monitor {
+  id: string;
+  url: string;
+  intervalSec: number;
+}
+
+export interface MonitorResult {
+  ok: boolean;
+  status?: number;
+  latencyMs: number;
+  certExpiryDays?: number;
+  checkedAt: number;
+  error?: string;
+  history: number[];
+}
 
 /** One workspace tab: an independent request + its result and UI state. */
 export interface Tab {
@@ -207,6 +246,19 @@ interface State {
   loadHistory: (entry: HistoryEntry) => void;
   loadRequest: (req: HttpRequest, name?: string) => void;
 
+  // Collection runner (request chaining).
+  runnerState: RunnerState | null;
+  runCollection: (collectionId: string) => Promise<void>;
+  closeRunner: () => void;
+
+  // Endpoint monitors.
+  monitors: Monitor[];
+  monitorResults: Record<string, MonitorResult>;
+  addMonitor: (url: string, intervalSec?: number) => void;
+  removeMonitor: (id: string) => void;
+  checkMonitor: (id: string) => Promise<void>;
+  tickMonitors: () => void;
+
   // Collections.
   refreshCollections: () => Promise<void>;
   upsertCollection: (c: Collection) => Promise<Collection>;
@@ -295,6 +347,37 @@ function appendMsg(
   };
   const next = [...list, msg];
   return next.length > RT_MSG_CAP ? next.slice(next.length - RT_MSG_CAP) : next;
+}
+
+// Monotonic token: each collection run (or runner close) bumps it so a stale,
+// still-in-flight run can't write its results into a newer run's state.
+let runToken = 0;
+
+// Monitors that are mid-check (prevents overlapping polls of the same endpoint).
+const monitorInFlight = new Set<string>();
+function persistMonitors(monitors: Monitor[]): void {
+  try {
+    localStorage.setItem("pulse.monitors", JSON.stringify(monitors));
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Flatten a collection tree into an ordered list of its requests. */
+function flattenRequests(
+  items: CollectionItem[],
+): { id: string; name: string; request: HttpRequest }[] {
+  const out: { id: string; name: string; request: HttpRequest }[] = [];
+  const walk = (list: CollectionItem[]) => {
+    for (const it of list) {
+      if (it.kind === "request" && it.request) {
+        out.push({ id: it.id, name: it.name, request: it.request });
+      }
+      if (it.children?.length) walk(it.children);
+    }
+  };
+  walk(items);
+  return out;
 }
 
 // Per-tab request tokens: bumping invalidates any in-flight send/profile for
@@ -432,6 +515,159 @@ export const useStore = create<State>((set, get) => {
   diffBaseline: null,
   pinDiffBaseline: () => set({ diffBaseline: get().response }),
   clearDiffBaseline: () => set({ diffBaseline: null }),
+
+  monitors: [],
+  monitorResults: {},
+  addMonitor: (url, intervalSec = 60) => {
+    const u = url.trim();
+    if (!u) return;
+    const m: Monitor = { id: crypto.randomUUID(), url: u, intervalSec };
+    const monitors = [...get().monitors, m];
+    set({ monitors });
+    persistMonitors(monitors);
+    get().checkMonitor(m.id);
+  },
+  removeMonitor: (id) => {
+    const monitors = get().monitors.filter((m) => m.id !== id);
+    const monitorResults = { ...get().monitorResults };
+    delete monitorResults[id];
+    set({ monitors, monitorResults });
+    persistMonitors(monitors);
+  },
+  checkMonitor: async (id) => {
+    const m = get().monitors.find((x) => x.id === id);
+    if (!m || monitorInFlight.has(id)) return;
+    monitorInFlight.add(id);
+    const req: HttpRequest = { ...defaultRequest(), method: "GET", url: m.url };
+    try {
+      const res = await api.probeRequest(req, get().activeVars());
+      const leaf = res.network.tls?.certificates?.[0];
+      const certExpiryDays =
+        leaf?.notAfterTs != null
+          ? Math.floor((leaf.notAfterTs * 1000 - Date.now()) / 86_400_000)
+          : undefined;
+      // The monitor may have been removed while this check was in flight.
+      if (!get().monitors.some((x) => x.id === id)) return;
+      const prev = get().monitorResults[id];
+      const history = [...(prev?.history ?? []), res.timings.totalMs].slice(-30);
+      set((s) => ({
+        monitorResults: {
+          ...s.monitorResults,
+          [id]: {
+            ok: res.status < 400,
+            status: res.status,
+            latencyMs: res.timings.totalMs,
+            certExpiryDays,
+            checkedAt: Date.now(),
+            history,
+          },
+        },
+      }));
+    } catch (e) {
+      if (!get().monitors.some((x) => x.id === id)) return;
+      const prev = get().monitorResults[id];
+      set((s) => ({
+        monitorResults: {
+          ...s.monitorResults,
+          [id]: {
+            ok: false,
+            latencyMs: 0,
+            checkedAt: Date.now(),
+            error: String(e),
+            history: prev?.history ?? [],
+          },
+        },
+      }));
+    } finally {
+      monitorInFlight.delete(id);
+    }
+  },
+  tickMonitors: () => {
+    const now = Date.now();
+    for (const m of get().monitors) {
+      const r = get().monitorResults[m.id];
+      if (!r || now - r.checkedAt >= m.intervalSec * 1000) {
+        get().checkMonitor(m.id);
+      }
+    }
+  },
+
+  runnerState: null,
+  closeRunner: () => {
+    runToken++; // stop any in-flight run from writing further
+    set({ runnerState: null });
+  },
+  runCollection: async (collectionId) => {
+    const col = get().collections.find((c) => c.id === collectionId);
+    if (!col) return;
+    const myToken = ++runToken; // supersede any run already in progress
+    const flat = flattenRequests(col.items);
+    if (!flat.length) {
+      set({ runnerState: { collectionName: col.name, running: false, total: 0, done: 0, results: [] } });
+      return;
+    }
+    set({
+      runnerState: { collectionName: col.name, running: true, total: flat.length, done: 0, results: [] },
+    });
+
+    // Variables are threaded in-memory through the run (scripts can set them for
+    // later requests); the saved environment is NOT mutated.
+    let vars: Record<string, string> = { ...get().activeVars() };
+    const results: RunnerResult[] = [];
+
+    for (const item of flat) {
+      let effective = structuredClone(item.request);
+      let status: number | undefined;
+      let ok = false;
+      let error: string | undefined;
+      let scriptError: string | undefined;
+      let testsPassed = 0;
+      let testsFailed = 0;
+      const t0 = performance.now();
+      try {
+        if (effective.preRequestScript && effective.preRequestScript.trim()) {
+          const r = await runScript("pre", effective.preRequestScript, effective, null, { ...vars });
+          effective = r.request;
+          vars = r.vars;
+          if (r.error) scriptError = `pre-script: ${r.error}`;
+        }
+        const res = await api.sendRequest(effective, vars, item.request);
+        status = res.status;
+        ok = res.status < 400;
+        if (effective.postResponseScript && effective.postResponseScript.trim()) {
+          const r = await runScript("post", effective.postResponseScript, effective, res, { ...vars });
+          vars = r.vars;
+          testsPassed = r.tests.filter((t) => t.passed).length;
+          testsFailed = r.tests.filter((t) => !t.passed).length;
+          if (r.error) scriptError = `test error: ${r.error}`;
+          if (testsFailed > 0 || r.error) ok = false;
+        }
+      } catch (e) {
+        error = String(e);
+        ok = false;
+      }
+      results.push({
+        id: item.id,
+        name: item.name,
+        method: item.request.method,
+        status,
+        ok,
+        timeMs: performance.now() - t0,
+        testsPassed,
+        testsFailed,
+        error: error ?? scriptError,
+      });
+      // Bail if this run was superseded (closed, or a newer run started).
+      if (runToken !== myToken) return;
+      const cur = get().runnerState;
+      if (!cur) return;
+      set({ runnerState: { ...cur, done: results.length, results: [...results] } });
+    }
+    if (runToken !== myToken) return;
+    const cur = get().runnerState;
+    if (cur) set({ runnerState: { ...cur, running: false } });
+    get().refreshHistory();
+  },
 
   rt: {
     status: "idle",
@@ -576,6 +812,27 @@ export const useStore = create<State>((set, get) => {
             : tabs[0].id;
           const active = tabs.find((t) => t.id === activeTabId)!;
           set({ tabs, activeTabId, ...flatFromTab(active) });
+        }
+      }
+    } catch {
+      /* ignore malformed */
+    }
+
+    // Restore monitored endpoints.
+    try {
+      const raw = LS.get("pulse.monitors", "");
+      if (raw) {
+        const list = JSON.parse(raw);
+        if (Array.isArray(list)) {
+          set({
+            monitors: list
+              .filter((m: unknown): m is Monitor => !!m && typeof (m as Monitor).url === "string")
+              .map((m: Monitor) => ({
+                id: typeof m.id === "string" ? m.id : crypto.randomUUID(),
+                url: m.url,
+                intervalSec: typeof m.intervalSec === "number" ? m.intervalSec : 60,
+              })),
+          });
         }
       }
     } catch {
