@@ -1,7 +1,8 @@
 import { Activity, Moon, PanelBottom, PanelRight, Sun } from "lucide-react";
 import { useStore } from "../store";
-import { IconButton } from "./ui";
+import { IconButton, cx } from "./ui";
 import { EnvControl } from "./EnvManager";
+import { titleBarLeftInset } from "../lib/platform";
 
 export function TitleBar() {
   const theme = useStore((s) => s.theme);
@@ -12,7 +13,12 @@ export function TitleBar() {
   return (
     <header
       data-tauri-drag-region
-      className="drag-region flex h-11 shrink-0 items-center gap-2 border-b border-slate-200 bg-white/80 pl-[92px] pr-3 backdrop-blur dark:border-white/[0.08] dark:bg-[#0b0e14]/80"
+      className={cx(
+        "drag-region flex h-11 shrink-0 items-center gap-2 border-b border-slate-200 bg-white/80 pr-3 backdrop-blur dark:border-white/[0.08] dark:bg-[#0b0e14]/80",
+        // macOS reserves space for the overlaid traffic-light buttons; Windows
+        // and Linux draw window controls in their native title bar (top-right).
+        titleBarLeftInset,
+      )}
     >
       <Activity size={16} className="text-indigo-500" />
       <span className="text-sm font-semibold text-slate-800 dark:text-slate-100">

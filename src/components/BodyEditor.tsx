@@ -5,6 +5,7 @@ import type { Body, BodyMode, MultipartField } from "../lib/types";
 import { emptyMultipart } from "../lib/samples";
 import { beautifyJson } from "../lib/format";
 import { fetchWsdl } from "../lib/api";
+import { sampleFilePath } from "../lib/platform";
 import {
   emptyEnvelope,
   parseWsdl,
@@ -150,7 +151,7 @@ export function BodyEditor() {
             </label>
             <TextInput
               value={body.binaryPath}
-              placeholder="/Users/you/path/to/file.bin"
+              placeholder={sampleFilePath("path/to/file.bin")}
               onChange={(e) => setBody({ binaryPath: e.target.value })}
             />
             <p className="text-xs text-slate-400 dark:text-slate-500">
