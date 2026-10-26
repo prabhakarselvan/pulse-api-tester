@@ -4,6 +4,10 @@
 // blob worker created from the tauri:// custom scheme gets an opaque origin that
 // WebKit blocks under CSP. Runs user pre/post scripts with a pm-style API.
 
+// Postman exposes CryptoJS as a built-in; many auth/signature scripts rely on it
+// (SHA256, HMAC, Base64, AES, …). Bundle the real library and hand it to scripts.
+import CryptoJS from "crypto-js";
+
 // SECURITY: neutralize the worker's ambient network globals BEFORE any user code
 // runs. The sandbox must have no network — otherwise a malicious imported
 // collection's script could fetch()/WebSocket()/importScripts() out the user's
@@ -159,8 +163,8 @@ self.onmessage = function (e) {
 
   var error = null;
   try {
-    var f = new Function('pm', 'console', 'expect', 'request', 'response', code);
-    f(pm, cons, expect, req, responseApi);
+    var f = new Function('pm', 'console', 'expect', 'request', 'response', 'CryptoJS', code);
+    f(pm, cons, expect, req, responseApi, CryptoJS);
   } catch (err) {
     error = (err && err.message) ? err.message : String(err);
   }
