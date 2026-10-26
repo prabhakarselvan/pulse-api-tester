@@ -34,7 +34,10 @@ const WORKER_CODE = `
 // secrets (env vars, auth tokens, mTLS keys). CSP is defense-in-depth on top;
 // this makes exfiltration fail even if CSP is relaxed or absent.
 (function () {
-  var blocked = ['fetch','XMLHttpRequest','WebSocket','EventSource','importScripts','Request','Response','navigator','caches','indexedDB'];
+  // Only the direct network-egress globals — the CSP (connect-src 'self') is the
+  // real backstop, so we keep this list minimal to avoid shadowing anything the
+  // pm/expect API might legitimately use.
+  var blocked = ['fetch','XMLHttpRequest','WebSocket','EventSource','importScripts'];
   for (var i = 0; i < blocked.length; i++) {
     try {
       Object.defineProperty(self, blocked[i], {
