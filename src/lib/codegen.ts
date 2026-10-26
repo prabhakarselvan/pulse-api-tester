@@ -199,8 +199,15 @@ function tokenize(input: string): string[] {
   for (let i = 0; i < s.length; i++) {
     const ch = s[i];
     if (quote) {
-      if (ch === quote) quote = null;
-      else cur += ch;
+      // Inside double quotes, a backslash escapes " \ $ ` (shell rules); single
+      // quotes are literal. This keeps JSON bodies like "{\"a\":1}" intact.
+      if (quote === '"' && ch === "\\" && i + 1 < s.length && /["\\$`]/.test(s[i + 1])) {
+        cur += s[++i];
+      } else if (ch === quote) {
+        quote = null;
+      } else {
+        cur += ch;
+      }
     } else if (ch === '"' || ch === "'") {
       quote = ch;
     } else if (/\s/.test(ch)) {
@@ -217,6 +224,15 @@ function tokenize(input: string): string[] {
   if (cur) tokens.push(cur);
   return tokens;
 }
+
+// Common curl flags that take a value we don't model — consume their argument so
+// it is never mistaken for the URL (e.g. `curl -A Mozilla https://x` → URL=x).
+const VALUE_FLAGS = new Set([
+  "-A", "--user-agent", "-e", "--referer", "-o", "--output", "-m", "--max-time",
+  "--connect-timeout", "-x", "--proxy", "-T", "--upload-file", "-w", "--write-out",
+  "-c", "--cookie-jar", "--cert", "-E", "--key", "--cacert", "--capath", "--resolve",
+  "--retry", "-D", "--dump-header", "-r", "--range", "--limit-rate", "--interface",
+]);
 
 /** Parse a `curl …` command into an HttpRequest. Returns null if not curl. */
 export function parseCurl(input: string): HttpRequest | null {
@@ -260,6 +276,8 @@ export function parseCurl(input: string): HttpRequest | null {
     else if (t === "-k" || t === "--insecure") req.verifyTls = false;
     else if (t === "--compressed" || t === "-s" || t === "-i" || t === "-v" || t === "-#" || t === "--silent") {
       /* ignore */
+    } else if (VALUE_FLAGS.has(t)) {
+      next(); // consume and discard the flag's value so it isn't taken as the URL
     } else if (!t.startsWith("-") && !url) url = t;
   }
 

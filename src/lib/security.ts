@@ -47,13 +47,17 @@ function parseCookies(headers: KeyValue[]) {
   return headers
     .filter((h) => h.key.toLowerCase() === "set-cookie")
     .map((h) => {
-      const attrs = h.value.toLowerCase();
+      // Parse real attributes (the `;`-separated segments AFTER the name=value
+      // pair) so a value that merely contains "secure"/"httponly" isn't a false
+      // positive. attrs[0] is the cookie itself; the rest are flags.
+      const segments = h.value.split(";").map((s) => s.trim().toLowerCase());
       const name = h.value.split("=")[0].trim();
+      const flags = segments.slice(1);
       return {
         name,
-        secure: attrs.includes("secure"),
-        httpOnly: attrs.includes("httponly"),
-        sameSite: /samesite=/.test(attrs),
+        secure: flags.includes("secure"),
+        httpOnly: flags.includes("httponly"),
+        sameSite: flags.some((f) => f.startsWith("samesite=")),
       };
     });
 }

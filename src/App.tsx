@@ -58,7 +58,8 @@ export default function App() {
         if (s.requestMode === "http") {
           s.send();
         } else {
-          const live = s.rt.status === "open" || s.rt.status === "connecting";
+          const owned = s.rt.ownerTabId === s.activeTabId;
+          const live = owned && (s.rt.status === "open" || s.rt.status === "connecting");
           if (live) s.rtDisconnect();
           else s.rtConnect();
         }

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, ClipboardPaste, Code2, FilePlus, Radio, Save, Send } from "lucide-react";
 import { useStore, type BuilderTab } from "../store";
 import type { Auth } from "../lib/types";
@@ -36,8 +36,10 @@ export function RequestPanel() {
   const rtConnect = useStore((s) => s.rtConnect);
   const rtDisconnect = useStore((s) => s.rtDisconnect);
   const rtStatus = useStore((s) => s.rt.status);
+  // Only treat the (single, global) realtime connection as this tab's when it owns it.
+  const rtOwned = useStore((s) => s.rt.ownerTabId === s.activeTabId);
   const isHttp = requestMode === "http";
-  const rtLive = rtStatus === "open" || rtStatus === "connecting";
+  const rtLive = rtOwned && (rtStatus === "open" || rtStatus === "connecting");
 
   const modeOptions: SegOption<typeof requestMode>[] = [
     { value: "http", label: "HTTP" },
@@ -161,7 +163,7 @@ export function RequestPanel() {
             onClick={() => primaryAction()}
             className="px-5"
           >
-            {rtStatus === "connecting" ? (
+            {rtLive && rtStatus === "connecting" ? (
               <>
                 <Spinner className="h-4 w-4" /> Connecting
               </>
@@ -452,12 +454,27 @@ function SaveControl() {
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const request = useStore((s) => s.request);
   const saveCurrent = useStore((s) => s.saveCurrent);
   const updateCollectionRequest = useStore((s) => s.updateCollectionRequest);
   const source = useStore((s) => s.collectionSource);
 
+  const clearTimer = () => {
+    if (closeTimer.current) {
+      clearTimeout(closeTimer.current);
+      closeTimer.current = null;
+    }
+  };
+  useEffect(() => clearTimer, []); // clear any pending timer on unmount
+
+  const close = () => {
+    clearTimer();
+    setOpen(false);
+  };
+
   const openDialog = () => {
+    clearTimer(); // cancel a stale auto-close from a previous save
     // Prefer the current request name; otherwise derive one from the URL.
     let def = useStore.getState().requestName.trim();
     if (!def) {
@@ -476,12 +493,14 @@ function SaveControl() {
   };
 
   const run = async (fn: () => Promise<void>, ok: string) => {
+    if (busy) return;
     setBusy(true);
     setMsg(null);
     try {
       await fn();
       setMsg({ text: ok, ok: true });
-      setTimeout(() => setOpen(false), 650);
+      clearTimer();
+      closeTimer.current = setTimeout(() => setOpen(false), 650);
     } catch (e) {
       setMsg({ text: String(e), ok: false });
     } finally {
@@ -490,7 +509,10 @@ function SaveControl() {
   };
 
   const update = () => run(() => updateCollectionRequest(), "Updated in collection");
-  const saveNew = () => run(() => saveCurrent(name), "Saved");
+  const saveNew = () => {
+    if (!name.trim()) return;
+    run(() => saveCurrent(name), "Saved");
+  };
 
   return (
     <>
@@ -500,7 +522,7 @@ function SaveControl() {
       {open && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
-          onClick={() => setOpen(false)}
+          onClick={close}
         >
           <Panel className="w-96 max-w-[90vw] p-4 shadow-2xl">
             <div onClick={(e) => e.stopPropagation()} className="space-y-3">
@@ -539,7 +561,7 @@ function SaveControl() {
                 onChange={(e) => setName(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") saveNew();
-                  if (e.key === "Escape") setOpen(false);
+                  if (e.key === "Escape") close();
                 }}
                 placeholder="Request name"
               />
@@ -549,7 +571,7 @@ function SaveControl() {
                 </div>
               )}
               <div className="flex justify-end gap-2">
-                <Button variant="ghost" onClick={() => setOpen(false)}>
+                <Button variant="ghost" onClick={close}>
                   Cancel
                 </Button>
                 <Button variant="primary" onClick={saveNew} disabled={busy || !name.trim()}>

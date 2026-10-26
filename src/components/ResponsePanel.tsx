@@ -163,6 +163,11 @@ function ResponseBody({ res }: { res: HttpResponse }) {
   const fault = useMemo(() => parseSoapFault(res.body), [res.body]);
   // If "tree" was selected on a prior JSON response but this one isn't JSON, fall back.
   const effectiveView: BodyView = bodyView === "tree" && lang !== "json" ? "pretty" : bodyView;
+  // Memoize the (potentially expensive) pretty-print so it doesn't re-run on every render.
+  const prettyBody = useMemo(
+    () => (effectiveView === "pretty" ? maybePretty(res.body, lang) : res.body),
+    [effectiveView, res.body, lang],
+  );
 
   return (
     <div className="flex h-full flex-col gap-2 px-3 pb-3">
@@ -179,7 +184,7 @@ function ResponseBody({ res }: { res: HttpResponse }) {
           <Panel className="h-full overflow-hidden">
             <CodeEditor
               readOnly
-              value={effectiveView === "pretty" ? maybePretty(res.body, lang) : res.body}
+              value={prettyBody}
               lang={effectiveView === "pretty" ? lang : "text"}
             />
           </Panel>

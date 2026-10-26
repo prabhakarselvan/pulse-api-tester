@@ -12,10 +12,23 @@ import { useStore, type RtMessage, type RtStatus } from "../store";
 import { formatBytes, formatMs } from "../lib/format";
 import { EmptyState, cx } from "./ui";
 
+const IDLE_RT = {
+  status: "idle" as RtStatus,
+  protocol: "",
+  messages: [] as RtMessage[],
+  open: null,
+};
+
 export function RealtimePanel() {
-  const rt = useStore((s) => s.rt);
+  const rtRaw = useStore((s) => s.rt);
+  const activeTabId = useStore((s) => s.activeTabId);
   const requestMode = useStore((s) => s.requestMode);
   const rtClear = useStore((s) => s.rtClear);
+
+  // The realtime connection is global/single; only show it on the tab that owns
+  // it. Other tabs see a fresh idle console (and can start their own connection).
+  const owned = rtRaw.ownerTabId === activeTabId;
+  const rt = owned ? rtRaw : IDLE_RT;
 
   return (
     <div className="flex h-full flex-col">

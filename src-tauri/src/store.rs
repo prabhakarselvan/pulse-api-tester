@@ -95,7 +95,11 @@ pub fn list_saved(conn: &Connection) -> anyhow::Result<Vec<SavedRequest>> {
     })?;
     let mut out = Vec::new();
     for r in rows {
-        out.push(r?);
+        // Skip a single un-deserializable row rather than failing the whole list
+        // (one corrupt/legacy blob must not hide every other saved item).
+        if let Ok(v) = r {
+            out.push(v);
+        }
     }
     Ok(out)
 }
@@ -150,7 +154,11 @@ pub fn list_history(conn: &Connection, limit: i64) -> anyhow::Result<Vec<History
     })?;
     let mut out = Vec::new();
     for r in rows {
-        out.push(r?);
+        // Skip a single un-deserializable row rather than failing the whole list
+        // (one corrupt/legacy blob must not hide every other saved item).
+        if let Ok(v) = r {
+            out.push(v);
+        }
     }
     Ok(out)
 }
@@ -196,7 +204,11 @@ pub fn list_envs(conn: &Connection) -> anyhow::Result<Vec<SavedEnvironment>> {
     })?;
     let mut out = Vec::new();
     for r in rows {
-        out.push(r?);
+        // Skip a single un-deserializable row rather than failing the whole list
+        // (one corrupt/legacy blob must not hide every other saved item).
+        if let Ok(v) = r {
+            out.push(v);
+        }
     }
     Ok(out)
 }
@@ -242,7 +254,11 @@ pub fn list_collections(conn: &Connection) -> anyhow::Result<Vec<Collection>> {
     })?;
     let mut out = Vec::new();
     for r in rows {
-        out.push(r?);
+        // Skip a single un-deserializable row rather than failing the whole list
+        // (one corrupt/legacy blob must not hide every other saved item).
+        if let Ok(v) = r {
+            out.push(v);
+        }
     }
     Ok(out)
 }

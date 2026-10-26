@@ -378,8 +378,11 @@ async fn perform_single(
     };
     let dns_info = dns_result.info;
 
-    // Return the fresh connection to the pool for subsequent keep-alive reuse.
-    if want_reuse {
+    // Return the fresh connection to the pool for subsequent keep-alive reuse —
+    // but only if the server didn't signal it will close it (`Connection: close`,
+    // or HTTP/1.0 without an explicit keep-alive). Pooling a to-be-closed socket
+    // would cause the next reused request to fail.
+    if want_reuse && response_allows_reuse(&parts) {
         let key = pool_key(&scheme, &host, port, req);
         pool_put(
             key,
@@ -770,8 +773,15 @@ async fn send_on_sender(
     };
     let ttfb = ms(send_start.elapsed());
     let (parts, body) = resp.into_parts();
+    // Declared Content-Length, if any — used to detect a truncated body hidden
+    // behind an unclean (no close_notify) TLS shutdown.
+    let expected_len = parts
+        .headers
+        .get(hyper::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok());
     let dl_start = Instant::now();
-    let bytes = collect_body(body).await?;
+    let bytes = collect_body(body, expected_len).await?;
     let dl = ms(dl_start.elapsed());
     Ok((parts, bytes, ttfb, dl))
 }
@@ -873,10 +883,36 @@ fn parse_proxy(proxy: &str) -> anyhow::Result<(String, u16, Option<String>)> {
     Ok((host, port, creds))
 }
 
+/// Whether a response's framing permits reusing the connection (HTTP keep-alive).
+/// False when `Connection: close` is present, or HTTP/1.0 without `keep-alive`.
+fn response_allows_reuse(parts: &http::response::Parts) -> bool {
+    let conn_hdr = parts
+        .headers
+        .get(hyper::header::CONNECTION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if conn_hdr.split(',').any(|t| t.trim() == "close") {
+        return false;
+    }
+    if parts.version == http::Version::HTTP_10 && !conn_hdr.contains("keep-alive") {
+        return false;
+    }
+    true
+}
+
 /// Read the full response body, tolerating an unclean TLS shutdown (a peer that
 /// closes without a `close_notify`). Many real servers/proxies do this; browsers
 /// and curl accept the bytes already received rather than erroring, so we do too.
-async fn collect_body(mut body: hyper::body::Incoming) -> anyhow::Result<Bytes> {
+///
+/// `expected_len` is the declared Content-Length, if any. Over TLS, hyper surfaces
+/// a missing-close_notify transport error even when the body was truncated mid
+/// Content-Length — so we tolerate the unclean EOF ONLY when we have already
+/// received at least the declared length. A genuinely short body still errors.
+async fn collect_body(
+    mut body: hyper::body::Incoming,
+    expected_len: Option<u64>,
+) -> anyhow::Result<Bytes> {
     let mut data: Vec<u8> = Vec::new();
     loop {
         match body.frame().await {
@@ -887,6 +923,16 @@ async fn collect_body(mut body: hyper::body::Incoming) -> anyhow::Result<Bytes> 
             }
             Some(Err(e)) => {
                 if is_unclean_eof(&e) {
+                    if let Some(expected) = expected_len {
+                        if (data.len() as u64) < expected {
+                            bail!(
+                                "response body truncated: got {} of {} declared bytes \
+                                 (connection closed without TLS close_notify)",
+                                data.len(),
+                                expected
+                            );
+                        }
+                    }
                     break;
                 }
                 return Err(e.into());
@@ -1247,37 +1293,38 @@ fn decompress(data: &[u8], encoding: Option<&str>) -> Vec<u8> {
     current
 }
 
+/// Hard cap on decompressed output size. A few KB of hostile gzip/zstd/brotli
+/// can expand to many GB ("decompression bomb"); `Read::take` bounds the output
+/// so a malicious response can never exhaust memory and abort the whole app.
+const MAX_DECOMPRESSED: u64 = 128 * 1024 * 1024;
+
 fn decode_one(data: &[u8], enc: &str) -> Vec<u8> {
     use std::io::Read;
+    // Read a decoder to end, but never more than MAX_DECOMPRESSED bytes.
+    fn capped(mut r: impl Read) -> std::io::Result<Vec<u8>> {
+        let mut out = Vec::new();
+        r.by_ref().take(MAX_DECOMPRESSED).read_to_end(&mut out)?;
+        Ok(out)
+    }
     let result: std::io::Result<Vec<u8>> = match enc {
-        "gzip" | "x-gzip" => {
-            let mut d = flate2::read::GzDecoder::new(data);
-            let mut out = Vec::new();
-            d.read_to_end(&mut out).map(|_| out)
-        }
-        "deflate" => {
-            let mut d = flate2::read::ZlibDecoder::new(data);
-            let mut out = Vec::new();
-            d.read_to_end(&mut out).map(|_| out)
-        }
-        "br" => {
-            let mut d = brotli::Decompressor::new(data, 4096);
-            let mut out = Vec::new();
-            d.read_to_end(&mut out).map(|_| out)
-        }
-        "zstd" => zstd::stream::decode_all(data),
+        // MultiGzDecoder (not GzDecoder) so concatenated gzip members — valid per
+        // RFC 1952, emitted by pigz and some CDNs — aren't silently truncated.
+        "gzip" | "x-gzip" => capped(flate2::read::MultiGzDecoder::new(data)),
+        "deflate" => capped(flate2::read::ZlibDecoder::new(data)),
+        "br" => capped(brotli::Decompressor::new(data, 4096)),
+        "zstd" => match zstd::stream::read::Decoder::new(data) {
+            Ok(d) => capped(d),
+            Err(e) => Err(e),
+        },
         _ => return data.to_vec(), // unknown coding — leave as-is
     };
     match result {
         Ok(v) => v,
         Err(_) if enc == "deflate" => {
             // Some servers send raw (headerless) deflate — try that.
-            let mut d = flate2::read::DeflateDecoder::new(data);
-            let mut out = Vec::new();
-            if d.read_to_end(&mut out).is_ok() {
-                out
-            } else {
-                data.to_vec()
+            match capped(flate2::read::DeflateDecoder::new(data)) {
+                Ok(v) => v,
+                Err(_) => data.to_vec(),
             }
         }
         Err(_) => data.to_vec(),

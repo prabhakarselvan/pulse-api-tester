@@ -5,6 +5,11 @@ import { EmptyState, cx } from "./ui";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Json = any;
 
+/** Max children rendered per node before a "show more" control (perf guard). */
+const CHILD_CAP = 200;
+/** Max rows rendered in the array-of-objects table view. */
+const TABLE_ROW_CAP = 500;
+
 export function JsonTree({ text }: { text: string }) {
   const parsed = useMemo(() => {
     try {
@@ -65,6 +70,8 @@ function Node({
 }) {
   const [open, setOpen] = useState(defaultOpen || depth < 1);
   const [asTable, setAsTable] = useState(false);
+  // Render children in batches so a huge array/object can't freeze the webview.
+  const [limit, setLimit] = useState(CHILD_CAP);
   const isObj = value && typeof value === "object";
   const label =
     name === null ? null : (
@@ -131,9 +138,20 @@ function Node({
           {asTable && tableable ? (
             <ObjectTable rows={value as Record<string, Json>[]} />
           ) : (
-            entries.map(([k, v]) => (
-              <Node key={String(k)} name={k} value={v} depth={depth + 1} />
-            ))
+            <>
+              {entries.slice(0, limit).map(([k, v]) => (
+                <Node key={String(k)} name={k} value={v} depth={depth + 1} />
+              ))}
+              {entries.length > limit && (
+                <button
+                  onClick={() => setLimit((l) => l + CHILD_CAP)}
+                  className="no-drag my-1 rounded px-2 py-0.5 text-[11px] font-medium text-indigo-500 hover:bg-indigo-500/10"
+                >
+                  Show {Math.min(CHILD_CAP, entries.length - limit)} more ·{" "}
+                  {entries.length - limit} of {entries.length} hidden
+                </button>
+              )}
+            </>
           )}
           <div className="pl-[1.1rem] text-slate-400">{bracket[1]}</div>
         </div>
@@ -142,8 +160,10 @@ function Node({
   );
 }
 
-function ObjectTable({ rows }: { rows: Record<string, Json>[] }) {
-  // Column union, capped for width.
+function ObjectTable({ rows: allRows }: { rows: Record<string, Json>[] }) {
+  // Cap rows so a 100k-element array can't lock the renderer.
+  const rows = allRows.slice(0, TABLE_ROW_CAP);
+  // Column union (also bounded by the row cap).
   const cols: string[] = [];
   for (const r of rows) {
     for (const k of Object.keys(r)) if (!cols.includes(k)) cols.push(k);
@@ -153,6 +173,11 @@ function ObjectTable({ rows }: { rows: Record<string, Json>[] }) {
 
   return (
     <div className="my-1 overflow-x-auto">
+      {allRows.length > TABLE_ROW_CAP && (
+        <div className="pb-1 text-[10px] text-slate-400">
+          showing first {TABLE_ROW_CAP} of {allRows.length} rows
+        </div>
+      )}
       <table className="border-collapse text-[11px]">
         <thead>
           <tr>

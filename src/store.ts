@@ -66,6 +66,8 @@ export interface RealtimeState {
   messages: RtMessage[];
   open: { timings: Timings; network: NetworkInfo; status: number | null } | null;
   error: string | null;
+  /** The tab that owns this (single) connection — other tabs must not control it. */
+  ownerTabId: string | null;
 }
 
 export interface ProfileState {
@@ -146,6 +148,8 @@ export interface Tab {
   requestMode: RequestMode;
   /** Set when the request was opened from a collection item (enables in-place Save). */
   collectionSource: CollectionSource | null;
+  /** Pinned A/B diff baseline — per tab, so one tab's baseline can't leak into another. */
+  diffBaseline: HttpResponse | null;
   profile: ProfileState | null;
   testResults: TestResult[];
   scriptLogs: LogLine[];
@@ -312,6 +316,7 @@ const freshTab = (): Tab => ({
   bodyView: "pretty",
   requestMode: "http",
   collectionSource: null,
+  diffBaseline: null,
   profile: null,
   testResults: [],
   scriptLogs: [],
@@ -329,6 +334,7 @@ const flatFromTab = (t: Tab) => ({
   bodyView: t.bodyView,
   requestMode: t.requestMode,
   collectionSource: t.collectionSource,
+  diffBaseline: t.diffBaseline,
   profile: t.profile,
   testResults: t.testResults,
   scriptLogs: t.scriptLogs,
@@ -346,6 +352,7 @@ const freshRt = (): RealtimeState => ({
   messages: [],
   open: null,
   error: null,
+  ownerTabId: null,
 });
 const RT_MSG_CAP = 500;
 function appendMsg(
@@ -421,6 +428,7 @@ export const useStore = create<State>((set, get) => {
       bodyView: s.bodyView,
       requestMode: s.requestMode,
       collectionSource: s.collectionSource,
+      diffBaseline: s.diffBaseline,
       profile: s.profile,
       testResults: s.testResults,
       scriptLogs: s.scriptLogs,
@@ -491,7 +499,13 @@ export const useStore = create<State>((set, get) => {
         "pulse.tabs",
         JSON.stringify({
           activeTabId: get().activeTabId,
-          tabs: committed.map((t) => ({ id: t.id, name: t.name, request: t.request, activeId: t.activeId })),
+          tabs: committed.map((t) => ({
+            id: t.id,
+            name: t.name,
+            request: t.request,
+            activeId: t.activeId,
+            requestMode: t.requestMode,
+          })),
         }),
       );
     } catch {
@@ -693,6 +707,7 @@ export const useStore = create<State>((set, get) => {
     messages: [],
     open: null,
     error: null,
+    ownerTabId: null,
   },
 
   sidebarTab: "history",
@@ -817,13 +832,25 @@ export const useStore = create<State>((set, get) => {
         const data = JSON.parse(raw);
         if (data && Array.isArray(data.tabs) && data.tabs.length) {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const tabs: Tab[] = data.tabs.map((d: any) => ({
-            ...freshTab(),
-            id: typeof d.id === "string" ? d.id : crypto.randomUUID(),
-            name: typeof d.name === "string" ? d.name : "",
-            request: { ...defaultRequest(), ...(d.request || {}) },
-            activeId: d.activeId ?? null,
-          }));
+          const tabs: Tab[] = data.tabs.map((d: any) => {
+            // Merge over defaults, then re-assert that collection-shaped array
+            // fields are arrays (guards a corrupted/tampered localStorage blob
+            // from crashing the UI at `request.headers.filter(...)`).
+            const req = { ...defaultRequest(), ...(d.request || {}) };
+            if (!Array.isArray(req.headers)) req.headers = [];
+            if (!Array.isArray(req.queryParams)) req.queryParams = [];
+            if (!req.body || typeof req.body !== "object") req.body = defaultRequest().body;
+            const mode: RequestMode =
+              d.requestMode === "ws" || d.requestMode === "sse" ? d.requestMode : "http";
+            return {
+              ...freshTab(),
+              id: typeof d.id === "string" ? d.id : crypto.randomUUID(),
+              name: typeof d.name === "string" ? d.name : "",
+              request: req,
+              activeId: d.activeId ?? null,
+              requestMode: mode,
+            };
+          });
           const activeTabId = tabs.some((t) => t.id === data.activeTabId)
             ? data.activeTabId
             : tabs[0].id;
@@ -895,7 +922,9 @@ export const useStore = create<State>((set, get) => {
       updatedAt: 0,
     };
     const saved = await api.saveRequest(item);
-    set({ activeId: saved.id, requestName: saved.name });
+    // "Save as new" forks the request into the Saved list; it is now linked to
+    // that saved item (activeId), no longer to any origin collection item.
+    set({ activeId: saved.id, requestName: saved.name, collectionSource: null });
     await get().refreshSaved();
   },
 
@@ -1238,6 +1267,7 @@ export const useStore = create<State>((set, get) => {
         messages: appendMsg([], "system", `Connecting to ${request.url}…`),
         open: null,
         error: null,
+        ownerTabId: get().activeTabId,
       },
     });
 
@@ -1267,6 +1297,7 @@ export const useStore = create<State>((set, get) => {
   rtSend: async (text: string) => {
     const { rt } = get();
     if (rt.status !== "open" || !rt.connId) return;
+    if (rt.ownerTabId !== get().activeTabId) return; // not this tab's connection
     if (get().requestMode !== "ws") return; // SSE is receive-only
     try {
       await api.wsSend(rt.connId, text);

@@ -51,10 +51,12 @@ function sampleFromSchema(schema: Json, root: Json, depth = 0): Json {
   if (Array.isArray(schema.enum) && schema.enum.length) return schema.enum[0];
 
   if (schema.allOf) {
-    return Object.assign(
-      {},
-      ...schema.allOf.map((s: Json) => sampleFromSchema(s, root, depth + 1)).filter(Boolean),
-    );
+    // Merge only object-typed members; a scalar member (e.g. {type:"string"})
+    // must not be spread into the result as numeric-indexed characters.
+    const parts = schema.allOf
+      .map((s: Json) => sampleFromSchema(s, root, depth + 1))
+      .filter((v: Json) => v && typeof v === "object" && !Array.isArray(v));
+    return Object.assign({}, ...parts);
   }
   if (schema.oneOf || schema.anyOf) {
     return sampleFromSchema((schema.oneOf ?? schema.anyOf)[0], root, depth + 1);
@@ -97,7 +99,9 @@ function baseUrl(spec: Json, isV3: boolean, hint?: string): string {
     // Substitute server variables with their defaults.
     const vars = spec.servers?.[0]?.variables ?? {};
     for (const [name, v] of Object.entries<Json>(vars)) {
-      url = url.replace(new RegExp(`\\{${name}\\}`, "g"), String(v?.default ?? ""));
+      // Plain string replace of the literal `{name}` — avoids a RegExp crash when
+      // the variable name contains regex metacharacters.
+      url = url.split(`{${name}}`).join(String(v?.default ?? ""));
     }
     if (url && !/^https?:\/\//i.test(url) && hint) {
       try {
@@ -170,8 +174,10 @@ export function parseOpenApi(text: string, urlHint?: string): OpenApiImport {
       req.method = method.toUpperCase();
       req.url = `${base}${path}`;
 
-      // Parameters (merge path-level + operation-level).
-      const params: Json[] = [...(pathItem.parameters ?? []), ...(op.parameters ?? [])].map((p) =>
+      // Parameters (merge path-level + operation-level). Guard against a
+      // malformed spec where `parameters` is not an array.
+      const asArray = (v: Json): Json[] => (Array.isArray(v) ? v : []);
+      const params: Json[] = [...asArray(pathItem.parameters), ...asArray(op.parameters)].map((p) =>
         p?.$ref ? resolveRef(p.$ref, spec) : p,
       );
       for (const p of params) {
@@ -184,8 +190,11 @@ export function parseOpenApi(text: string, urlHint?: string): OpenApiImport {
         }
       }
 
-      // v3 request body.
-      const content = op.requestBody?.content;
+      // v3 request body (dereference a $ref on requestBody itself).
+      const requestBody = op.requestBody?.$ref
+        ? resolveRef(op.requestBody.$ref, spec)
+        : op.requestBody;
+      const content = requestBody?.content;
       if (content) {
         const jsonCt =
           content["application/json"] ??

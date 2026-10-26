@@ -57,8 +57,11 @@ fn ws_registry() -> &'static Mutex<HashMap<String, mpsc::UnboundedSender<WsCmd>>
     REG.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn sse_registry() -> &'static Mutex<HashMap<String, tokio::task::AbortHandle>> {
-    static REG: OnceLock<Mutex<HashMap<String, tokio::task::AbortHandle>>> = OnceLock::new();
+/// SSE connections register a cancel sender BEFORE spawning the reader task, so
+/// the task's self-removal on exit can never orphan an entry (dropping the
+/// sender, e.g. from `sse_close`, cancels the task via its select! arm).
+fn sse_registry() -> &'static Mutex<HashMap<String, mpsc::UnboundedSender<()>>> {
+    static REG: OnceLock<Mutex<HashMap<String, mpsc::UnboundedSender<()>>>> = OnceLock::new();
     REG.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -250,9 +253,14 @@ pub async fn ws_close(id: String) -> Result<(), String> {
 /// Coerce a user-entered URL into a ws:// or wss:// URL.
 fn normalize_ws_url(raw: &str) -> anyhow::Result<Url> {
     let raw = raw.trim();
-    let with_scheme = if raw.contains("://") {
-        raw.replacen("https://", "wss://", 1)
-            .replacen("http://", "ws://", 1)
+    // Only rewrite the SCHEME prefix — not an http(s):// that appears inside the
+    // path or query (e.g. a redirect-target query parameter).
+    let with_scheme = if let Some(rest) = raw.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = raw.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else if raw.contains("://") {
+        raw.to_string()
     } else {
         format!("wss://{raw}")
     };
@@ -309,60 +317,99 @@ pub async fn sse_connect(request: HttpRequest, on_event: Channel<StreamEvent>) -
         dns, tls, connection, url.scheme().to_string(), "SSE", Some(status), dns_ms, tcp_ms, tls_ms,
     ));
 
+    // Register a cancel sender BEFORE spawning the reader (so the task's
+    // self-removal on exit can't orphan an entry), mirroring the WebSocket path.
+    let (cancel_tx, mut cancel_rx) = mpsc::unbounded_channel::<()>();
+    sse_registry().lock().await.insert(id.clone(), cancel_tx);
+
     let mut body = resp.into_body();
     let ev = on_event.clone();
     let id_task = id.clone();
-    let handle = tokio::spawn(async move {
-        let mut buf = String::new();
+    tokio::spawn(async move {
+        // Accumulate RAW bytes and decode only COMPLETE events, so a multibyte
+        // UTF-8 character split across HTTP frames is never corrupted. Capped so
+        // a never-terminated stream can't grow without bound.
+        const SSE_BUF_CAP: usize = 8 * 1024 * 1024;
+        let mut buf: Vec<u8> = Vec::new();
         loop {
-            match body.frame().await {
-                Some(Ok(frame)) => {
-                    if let Ok(chunk) = frame.into_data() {
-                        buf.push_str(&String::from_utf8_lossy(&chunk));
-                        buf = buf.replace("\r\n", "\n");
-                        while let Some(pos) = buf.find("\n\n") {
-                            let raw = buf[..pos].to_string();
-                            buf = buf[pos + 2..].to_string();
-                            if let Some((data, is_info)) = parse_sse_event(&raw) {
-                                let _ = ev.send(if is_info {
-                                    StreamEvent::Info { message: data }
-                                } else {
-                                    StreamEvent::Message {
-                                        direction: "received".into(),
-                                        bytes: data.len(),
-                                        data,
-                                        binary: false,
-                                    }
+            tokio::select! {
+                _ = cancel_rx.recv() => break, // sender dropped by sse_close
+                frame = body.frame() => match frame {
+                    Some(Ok(fr)) => {
+                        if let Ok(chunk) = fr.into_data() {
+                            buf.extend_from_slice(&chunk);
+                            while let Some((end, sep)) = sse_event_boundary(&buf) {
+                                let block = String::from_utf8_lossy(&buf[..end])
+                                    .replace("\r\n", "\n")
+                                    .replace('\r', "\n");
+                                buf.drain(..end + sep);
+                                if let Some((data, is_info)) = parse_sse_event(&block) {
+                                    let _ = ev.send(if is_info {
+                                        StreamEvent::Info { message: data }
+                                    } else {
+                                        StreamEvent::Message {
+                                            direction: "received".into(),
+                                            bytes: data.len(),
+                                            data,
+                                            binary: false,
+                                        }
+                                    });
+                                }
+                            }
+                            if buf.len() > SSE_BUF_CAP {
+                                let _ = ev.send(StreamEvent::Error {
+                                    message: "SSE event exceeded the buffer cap; stream reset".into(),
                                 });
+                                buf.clear();
                             }
                         }
                     }
-                }
-                Some(Err(e)) => {
-                    let _ = ev.send(StreamEvent::Error { message: e.to_string() });
-                    break;
-                }
-                None => {
-                    let _ = ev.send(StreamEvent::Closed { reason: "stream ended".into() });
-                    break;
-                }
+                    Some(Err(e)) => {
+                        let _ = ev.send(StreamEvent::Error { message: e.to_string() });
+                        break;
+                    }
+                    None => {
+                        let _ = ev.send(StreamEvent::Closed { reason: "stream ended".into() });
+                        break;
+                    }
+                },
             }
         }
         sse_registry().lock().await.remove(&id_task);
     });
 
-    sse_registry()
-        .lock()
-        .await
-        .insert(id.clone(), handle.abort_handle());
     Ok(id)
+}
+
+/// Find the first complete SSE event in `buf`. Events are separated by a blank
+/// line, which may be `\n\n`, `\r\n\r\n`, or `\r\r`. Returns `(event_len,
+/// separator_len)` — bytes `[0, event_len)` are the event, and `event_len +
+/// separator_len` bytes should be consumed.
+fn sse_event_boundary(buf: &[u8]) -> Option<(usize, usize)> {
+    let n = buf.len();
+    let mut i = 0;
+    while i + 1 < n {
+        if buf[i] == b'\n' && buf[i + 1] == b'\n' {
+            return Some((i, 2));
+        }
+        if buf[i] == b'\r' {
+            if i + 3 < n && buf[i + 1] == b'\n' && buf[i + 2] == b'\r' && buf[i + 3] == b'\n' {
+                return Some((i, 4));
+            }
+            if buf[i + 1] == b'\r' {
+                return Some((i, 2));
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 #[tauri::command]
 pub async fn sse_close(id: String) -> Result<(), String> {
-    if let Some(handle) = sse_registry().lock().await.remove(&id) {
-        handle.abort();
-    }
+    // Removing the entry drops the cancel sender; the reader task's select! arm
+    // on `cancel_rx.recv()` then fires (returns None) and the task exits.
+    sse_registry().lock().await.remove(&id);
     Ok(())
 }
 
@@ -410,4 +457,39 @@ fn normalize_http_url(raw: &str) -> anyhow::Result<Url> {
         anyhow::bail!("SSE URL must use http:// or https://");
     }
     Ok(url)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sse_boundary_detects_separators() {
+        assert_eq!(sse_event_boundary(b"data: x\n\nrest"), Some((7, 2)));
+        assert_eq!(sse_event_boundary(b"data: x\r\n\r\nrest"), Some((7, 4)));
+        assert_eq!(sse_event_boundary(b"data: x\r\rrest"), Some((7, 2)));
+        assert_eq!(sse_event_boundary(b"data: incomplete\n"), None);
+        assert_eq!(sse_event_boundary(b""), None);
+    }
+
+    #[test]
+    fn sse_multibyte_not_corrupted_across_frames() {
+        // "€" = E2 82 AC split across two frames; decoding the COMPLETE event
+        // (after the boundary) must preserve it.
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(b"data: \xE2"); // frame 1 ends mid-character
+        buf.extend_from_slice(b"\x82\xAC\n\n"); // frame 2 completes it + terminator
+        let (end, sep) = sse_event_boundary(&buf).unwrap();
+        let block = String::from_utf8_lossy(&buf[..end]);
+        assert_eq!(block, "data: €");
+        assert_eq!(end + sep, buf.len());
+    }
+
+    #[test]
+    fn ws_url_only_rewrites_scheme() {
+        // An embedded http:// in the query must NOT be rewritten.
+        let u = normalize_ws_url("https://h/cb?u=http://x").unwrap();
+        assert_eq!(u.scheme(), "wss");
+        assert!(u.as_str().contains("u=http://x"));
+    }
 }

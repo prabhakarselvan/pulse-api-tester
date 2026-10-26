@@ -124,18 +124,21 @@ pub async fn connect_stream(url: &Url, is_tls: bool, req: &HttpRequest) -> anyho
     let local_addr = tcp.local_addr().ok().map(|a| a.to_string());
     let remote_addr = tcp.peer_addr().ok().map(|a| a.to_string());
 
-    // --- TLS ---
+    // --- TLS (bounded by `timeout`, so a peer that completes the TCP connect
+    // then stalls during the handshake cannot hang the realtime command forever) ---
     let (stream, tls_info, tls_ms) = if is_tls {
         let tls_start = Instant::now();
-        let (tls_stream, tls_info, _is_h2) = tls::handshake(
+        let handshake = tls::handshake(
             tcp,
             &host,
             req.verify_tls,
             &req.client_cert_pem,
             &req.client_key_pem,
-        )
-        .await
-        .context("TLS handshake failed")?;
+        );
+        let (tls_stream, tls_info, _is_h2) = tokio::time::timeout(timeout, handshake)
+            .await
+            .map_err(|_| anyhow!("TLS handshake timed out"))?
+            .context("TLS handshake failed")?;
         (
             MaybeTls::Tls(Box::new(tls_stream)),
             Some(tls_info),
