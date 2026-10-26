@@ -28,6 +28,22 @@ export interface ScriptResult {
 // The worker body. Written in ES5-ish style with NO backticks / ${} so it can
 // live safely inside this template literal.
 const WORKER_CODE = `
+// SECURITY: neutralize the worker's ambient network globals BEFORE any user code
+// runs. The sandbox must have no network — otherwise a malicious imported
+// collection's script could fetch()/WebSocket()/importScripts() out the user's
+// secrets (env vars, auth tokens, mTLS keys). CSP is defense-in-depth on top;
+// this makes exfiltration fail even if CSP is relaxed or absent.
+(function () {
+  var blocked = ['fetch','XMLHttpRequest','WebSocket','EventSource','importScripts','Request','Response','navigator','caches','indexedDB'];
+  for (var i = 0; i < blocked.length; i++) {
+    try {
+      Object.defineProperty(self, blocked[i], {
+        value: undefined, writable: false, configurable: false,
+      });
+    } catch (_) { /* some engines disallow redefining — best effort */ }
+  }
+})();
+
 self.onmessage = function (e) {
   var data = e.data;
   var code = data.code, request = data.request, response = data.response;

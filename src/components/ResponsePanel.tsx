@@ -160,9 +160,25 @@ function ResponseBody({ res }: { res: HttpResponse }) {
   if (lang === "json") views.splice(1, 0, { value: "tree", label: "Tree" });
 
   const empty = !res.body && !res.bodyBase64;
-  const fault = useMemo(() => parseSoapFault(res.body), [res.body]);
-  // If "tree" was selected on a prior JSON response but this one isn't JSON, fall back.
-  const effectiveView: BodyView = bodyView === "tree" && lang !== "json" ? "pretty" : bodyView;
+  // Above this size, skip whole-body parsing/pretty-printing (DOMParser,
+  // JSON.parse+stringify, prettyXml). A decompression bomb can produce a huge
+  // body; eager parsing it would freeze or OOM the webview. Raw view still works.
+  const LARGE_BODY = 2 * 1024 * 1024;
+  const tooLarge = res.body.length > LARGE_BODY;
+  const fault = useMemo(
+    () => (tooLarge ? null : parseSoapFault(res.body)),
+    [res.body, tooLarge],
+  );
+  // If "tree" was selected on a prior JSON response but this one isn't JSON (or
+  // the body is too large to parse eagerly), fall back to raw.
+  const effectiveView: BodyView =
+    bodyView === "tree" && (lang !== "json" || tooLarge)
+      ? tooLarge
+        ? "raw"
+        : "pretty"
+      : tooLarge && bodyView === "pretty"
+        ? "raw"
+        : bodyView;
   // Memoize the (potentially expensive) pretty-print so it doesn't re-run on every render.
   const prettyBody = useMemo(
     () => (effectiveView === "pretty" ? maybePretty(res.body, lang) : res.body),

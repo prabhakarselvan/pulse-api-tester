@@ -145,7 +145,10 @@ function mapBody(body: any): Body {
           enabled: d.disabled !== true,
           key: String(d.key),
           kind: d.type === "file" ? "file" : "text",
-          value: d.type === "file" ? String(d.src ?? "") : String(d.value ?? ""),
+          // SECURITY: never import a local file PATH from an untrusted collection
+          // — the backend would read that file and send it. Blank it so the user
+          // must explicitly re-attach a file via the picker.
+          value: d.type === "file" ? "" : String(d.value ?? ""),
         }));
       break;
     case "graphql":
@@ -158,7 +161,9 @@ function mapBody(body: any): Body {
       break;
     case "file":
       b.mode = "binary";
-      b.binaryPath = String(body.file?.src ?? "");
+      // SECURITY: do not import a local file path from an untrusted collection
+      // (the backend would read and upload that file). User must re-attach.
+      b.binaryPath = "";
       break;
     default:
       break;

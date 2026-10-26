@@ -1252,18 +1252,32 @@ fn same_origin(a: &Url, b: &Url) -> bool {
 }
 
 /// Drop credential-bearing headers (used when a redirect crosses origins).
-fn strip_sensitive_headers(headers: &mut Vec<(String, String)>, auth: &Auth) {
-    let apikey = if auth.kind == "apikey" && auth.api_key_in == "header" {
-        Some(auth.api_key_name.to_ascii_lowercase())
-    } else {
-        None
-    };
+/// Drop credential-bearing headers when a redirect crosses origins. A plain
+/// deny-list misses custom secret headers (e.g. `X-API-Key`, `X-Auth-Token`),
+/// which are extremely common — so we use a SAFELIST instead: only well-known,
+/// non-credential request headers survive a cross-origin redirect; everything
+/// else (anything the user might have put a secret in) is dropped.
+fn strip_sensitive_headers(headers: &mut Vec<(String, String)>, _auth: &Auth) {
+    const SAFE: &[&str] = &[
+        "accept",
+        "accept-charset",
+        "accept-encoding",
+        "accept-language",
+        "cache-control",
+        "content-type",
+        "content-length",
+        "user-agent",
+        "referer",
+        "origin",
+        "dnt",
+        "connection",
+        "pragma",
+        "te",
+        "upgrade-insecure-requests",
+    ];
     headers.retain(|(k, _)| {
         let lk = k.to_ascii_lowercase();
-        lk != "authorization"
-            && lk != "cookie"
-            && lk != "proxy-authorization"
-            && apikey.as_deref() != Some(lk.as_str())
+        SAFE.contains(&lk.as_str())
     });
 }
 

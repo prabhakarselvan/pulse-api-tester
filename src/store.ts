@@ -870,11 +870,19 @@ export const useStore = create<State>((set, get) => {
         if (Array.isArray(list)) {
           set({
             monitors: list
-              .filter((m: unknown): m is Monitor => !!m && typeof (m as Monitor).url === "string")
+              .filter(
+                (m: unknown): m is Monitor =>
+                  !!m &&
+                  typeof (m as Monitor).url === "string" &&
+                  // Only http(s) — monitors auto-poll on launch, so a tampered
+                  // store must not be able to point them at other schemes.
+                  /^https?:\/\//i.test((m as Monitor).url),
+              )
               .map((m: Monitor) => ({
                 id: typeof m.id === "string" ? m.id : crypto.randomUUID(),
                 url: m.url,
-                intervalSec: typeof m.intervalSec === "number" ? m.intervalSec : 60,
+                intervalSec:
+                  typeof m.intervalSec === "number" && m.intervalSec >= 5 ? m.intervalSec : 60,
               })),
           });
         }

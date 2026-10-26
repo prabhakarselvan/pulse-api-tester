@@ -19,8 +19,10 @@ pub async fn send_request(
     history_request: Option<HttpRequest>,
 ) -> Result<HttpResponse, String> {
     // History records the original authored request (falls back to the sent one).
-    // Templates keep {{vars}}; resolved secrets are never stored.
-    let req_for_history = history_request.unwrap_or_else(|| request.clone());
+    // Templates keep {{vars}}; resolved secrets are never stored. We also redact
+    // the mTLS private key — a replay log must never persist a private key.
+    let mut req_for_history = history_request.unwrap_or_else(|| request.clone());
+    req_for_history.client_key_pem = String::new();
     let effective = match &variables {
         Some(v) if !v.is_empty() => substitute_request(&request, v),
         _ => request,
