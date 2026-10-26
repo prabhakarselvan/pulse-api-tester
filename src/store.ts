@@ -123,6 +123,14 @@ export interface MonitorResult {
   history: number[];
 }
 
+/** Where a loaded request came from, so Save can update it in place. */
+export interface CollectionSource {
+  collectionId: string;
+  itemId: string;
+  itemName: string;
+  collectionName: string;
+}
+
 /** One workspace tab: an independent request + its result and UI state. */
 export interface Tab {
   id: string;
@@ -136,6 +144,8 @@ export interface Tab {
   responseTab: ResponseTab;
   bodyView: BodyView;
   requestMode: RequestMode;
+  /** Set when the request was opened from a collection item (enables in-place Save). */
+  collectionSource: CollectionSource | null;
   profile: ProfileState | null;
   testResults: TestResult[];
   scriptLogs: LogLine[];
@@ -191,6 +201,7 @@ interface State {
   error: string | null;
   loading: boolean;
   activeId: string | null; // id of the loaded saved request, if any
+  collectionSource: CollectionSource | null; // origin collection item, if any
 
   // Collections + history.
   saved: SavedRequest[];
@@ -245,6 +256,9 @@ interface State {
   loadSaved: (item: SavedRequest) => void;
   loadHistory: (entry: HistoryEntry) => void;
   loadRequest: (req: HttpRequest, name?: string) => void;
+  loadCollectionRequest: (source: CollectionSource, req: HttpRequest) => void;
+  /** Save the current request back into its origin collection item. */
+  updateCollectionRequest: () => Promise<void>;
 
   // Collection runner (request chaining).
   runnerState: RunnerState | null;
@@ -297,6 +311,7 @@ const freshTab = (): Tab => ({
   responseTab: "body",
   bodyView: "pretty",
   requestMode: "http",
+  collectionSource: null,
   profile: null,
   testResults: [],
   scriptLogs: [],
@@ -313,6 +328,7 @@ const flatFromTab = (t: Tab) => ({
   responseTab: t.responseTab,
   bodyView: t.bodyView,
   requestMode: t.requestMode,
+  collectionSource: t.collectionSource,
   profile: t.profile,
   testResults: t.testResults,
   scriptLogs: t.scriptLogs,
@@ -404,6 +420,7 @@ export const useStore = create<State>((set, get) => {
       responseTab: s.responseTab,
       bodyView: s.bodyView,
       requestMode: s.requestMode,
+      collectionSource: s.collectionSource,
       profile: s.profile,
       testResults: s.testResults,
       scriptLogs: s.scriptLogs,
@@ -914,6 +931,43 @@ export const useStore = create<State>((set, get) => {
     bumpToken(get().activeTabId);
     set({ ...flatFromTab(freshTab()), request: structuredClone(req), requestName: name });
     persistTabs();
+  },
+
+  loadCollectionRequest: (source, req) => {
+    bumpToken(get().activeTabId);
+    set({
+      ...flatFromTab(freshTab()),
+      request: structuredClone(req),
+      requestName: source.itemName,
+      collectionSource: source,
+    });
+    persistTabs();
+  },
+
+  updateCollectionRequest: async () => {
+    const { collectionSource, request, requestName } = get();
+    if (!collectionSource) return;
+    const col = get().collections.find((c) => c.id === collectionSource.collectionId);
+    if (!col) throw new Error("The source collection no longer exists.");
+    const newName = requestName.trim() || collectionSource.itemName;
+
+    // Walk the tree and replace the matching item's request (and name) in place.
+    let found = false;
+    const patchItems = (items: CollectionItem[]): CollectionItem[] =>
+      items.map((it) => {
+        if (it.id === collectionSource.itemId && it.kind === "request") {
+          found = true;
+          return { ...it, name: newName, request: structuredClone(request) };
+        }
+        if (it.children?.length) return { ...it, children: patchItems(it.children) };
+        return it;
+      });
+
+    const items = patchItems(col.items);
+    if (!found) throw new Error("The request is no longer in that collection.");
+    await get().upsertCollection({ ...col, items });
+    // Keep the in-memory source label in sync with the possibly-renamed item.
+    set({ collectionSource: { ...collectionSource, itemName: newName } });
   },
 
   // --- Collections ---

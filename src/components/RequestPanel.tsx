@@ -32,6 +32,7 @@ export function RequestPanel() {
   const setRequestName = useStore((s) => s.setRequestName);
   const requestMode = useStore((s) => s.requestMode);
   const setRequestMode = useStore((s) => s.setRequestMode);
+  const collectionSource = useStore((s) => s.collectionSource);
   const rtConnect = useStore((s) => s.rtConnect);
   const rtDisconnect = useStore((s) => s.rtDisconnect);
   const rtStatus = useStore((s) => s.rt.status);
@@ -82,13 +83,23 @@ export function RequestPanel() {
   return (
     <div className="flex h-full flex-col gap-3 p-3">
       {/* Request name (shown above the endpoint toolbar) */}
-      <input
-        value={requestName}
-        onChange={(e) => setRequestName(e.target.value)}
-        placeholder="Untitled request"
-        spellCheck={false}
-        className="no-drag w-full bg-transparent px-1 text-sm font-semibold text-slate-800 outline-none placeholder:font-normal placeholder:text-slate-400 dark:text-slate-100 dark:placeholder:text-slate-500"
-      />
+      <div className="flex items-center gap-2">
+        <input
+          value={requestName}
+          onChange={(e) => setRequestName(e.target.value)}
+          placeholder="Untitled request"
+          spellCheck={false}
+          className="no-drag min-w-0 flex-1 bg-transparent px-1 text-sm font-semibold text-slate-800 outline-none placeholder:font-normal placeholder:text-slate-400 dark:text-slate-100 dark:placeholder:text-slate-500"
+        />
+        {collectionSource && (
+          <span
+            className="shrink-0 truncate rounded bg-indigo-500/10 px-1.5 py-0.5 text-[10px] font-medium text-indigo-500"
+            title={`Linked to ${collectionSource.collectionName} — Save updates this request in the collection`}
+          >
+            ↩ {collectionSource.collectionName}
+          </span>
+        )}
+      </div>
 
       {/* Protocol mode */}
       <Segmented options={modeOptions} value={requestMode} onChange={setRequestMode} />
@@ -439,8 +450,12 @@ function Field({
 function SaveControl() {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
   const request = useStore((s) => s.request);
   const saveCurrent = useStore((s) => s.saveCurrent);
+  const updateCollectionRequest = useStore((s) => s.updateCollectionRequest);
+  const source = useStore((s) => s.collectionSource);
 
   const openDialog = () => {
     // Prefer the current request name; otherwise derive one from the URL.
@@ -456,13 +471,26 @@ function SaveControl() {
       }
     }
     setName(def);
+    setMsg(null);
     setOpen(true);
   };
 
-  const confirm = async () => {
-    await saveCurrent(name);
-    setOpen(false);
+  const run = async (fn: () => Promise<void>, ok: string) => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      await fn();
+      setMsg({ text: ok, ok: true });
+      setTimeout(() => setOpen(false), 650);
+    } catch (e) {
+      setMsg({ text: String(e), ok: false });
+    } finally {
+      setBusy(false);
+    }
   };
+
+  const update = () => run(() => updateCollectionRequest(), "Updated in collection");
+  const saveNew = () => run(() => saveCurrent(name), "Saved");
 
   return (
     <>
@@ -474,33 +502,58 @@ function SaveControl() {
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
           onClick={() => setOpen(false)}
         >
-          <Panel
-            className="w-80 p-4 shadow-2xl"
-            // stop backdrop close when clicking inside
-          >
-            <div
-              onClick={(e) => e.stopPropagation()}
-              className="space-y-3"
-            >
+          <Panel className="w-96 max-w-[90vw] p-4 shadow-2xl">
+            <div onClick={(e) => e.stopPropagation()} className="space-y-3">
               <div className="text-sm font-semibold text-slate-800 dark:text-slate-100">
                 Save request
               </div>
+
+              {source && (
+                <>
+                  <button
+                    onClick={update}
+                    disabled={busy}
+                    className="no-drag flex w-full items-center gap-2 rounded-lg border border-indigo-300/50 bg-indigo-50 px-3 py-2 text-left text-xs transition hover:bg-indigo-100 disabled:opacity-50 dark:border-indigo-500/30 dark:bg-indigo-500/10 dark:hover:bg-indigo-500/20"
+                  >
+                    <Save size={14} className="shrink-0 text-indigo-500" />
+                    <span className="min-w-0">
+                      <span className="font-semibold text-indigo-700 dark:text-indigo-300">
+                        Update “{source.itemName}”
+                      </span>
+                      <span className="block truncate text-indigo-600/70 dark:text-indigo-300/60">
+                        in {source.collectionName}
+                      </span>
+                    </span>
+                  </button>
+                  <div className="flex items-center gap-2 text-[11px] text-slate-400">
+                    <div className="h-px flex-1 bg-slate-200 dark:bg-white/[0.08]" />
+                    or save as a new request
+                    <div className="h-px flex-1 bg-slate-200 dark:bg-white/[0.08]" />
+                  </div>
+                </>
+              )}
+
               <TextInput
                 autoFocus
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") confirm();
+                  if (e.key === "Enter") saveNew();
                   if (e.key === "Escape") setOpen(false);
                 }}
                 placeholder="Request name"
               />
+              {msg && (
+                <div className={cx("text-xs", msg.ok ? "text-emerald-500" : "text-rose-500")}>
+                  {msg.text}
+                </div>
+              )}
               <div className="flex justify-end gap-2">
                 <Button variant="ghost" onClick={() => setOpen(false)}>
                   Cancel
                 </Button>
-                <Button variant="primary" onClick={confirm}>
-                  Save
+                <Button variant="primary" onClick={saveNew} disabled={busy || !name.trim()}>
+                  {source ? "Save as new" : "Save"}
                 </Button>
               </div>
             </div>

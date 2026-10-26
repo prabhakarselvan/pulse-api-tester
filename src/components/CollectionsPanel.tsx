@@ -174,7 +174,14 @@ function CollectionRow({
             <div className="px-8 py-1.5 text-[11px] text-slate-400">Empty</div>
           ) : (
             collection.items.map((it) => (
-              <ItemRow key={it.id} item={it} depth={1} forceOpen={forceOpen} />
+              <ItemRow
+                key={it.id}
+                item={it}
+                depth={1}
+                forceOpen={forceOpen}
+                collectionId={collection.id}
+                collectionName={collection.name}
+              />
             ))
           )}
         </div>
@@ -187,14 +194,18 @@ function ItemRow({
   item,
   depth,
   forceOpen,
+  collectionId,
+  collectionName,
 }: {
   item: CollectionItem;
   depth: number;
   forceOpen?: boolean;
+  collectionId: string;
+  collectionName: string;
 }) {
   const [open, setOpen] = useState(false);
   const isOpen = forceOpen || open;
-  const loadRequest = useStore((s) => s.loadRequest);
+  const loadCollectionRequest = useStore((s) => s.loadCollectionRequest);
   const pad = { paddingLeft: `${depth * 14 + 12}px` };
 
   if (item.kind === "folder") {
@@ -212,7 +223,14 @@ function ItemRow({
         </button>
         {isOpen &&
           (item.children ?? []).map((child) => (
-            <ItemRow key={child.id} item={child} depth={depth + 1} forceOpen={forceOpen} />
+            <ItemRow
+              key={child.id}
+              item={child}
+              depth={depth + 1}
+              forceOpen={forceOpen}
+              collectionId={collectionId}
+              collectionName={collectionName}
+            />
           ))}
       </div>
     );
@@ -220,7 +238,13 @@ function ItemRow({
 
   return (
     <button
-      onClick={() => item.request && loadRequest(item.request, item.name)}
+      onClick={() =>
+        item.request &&
+        loadCollectionRequest(
+          { collectionId, itemId: item.id, itemName: item.name, collectionName },
+          item.request,
+        )
+      }
       style={pad}
       className="flex w-full items-center gap-2 py-1.5 pr-2 text-left transition hover:bg-slate-100 dark:hover:bg-white/[0.03]"
       title={item.request?.url}
