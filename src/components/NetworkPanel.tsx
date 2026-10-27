@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ChevronDown, ChevronRight, MapPin, ShieldCheck } from "lucide-react";
+import { ChevronDown, ChevronRight, MapPin, ShieldAlert, ShieldCheck } from "lucide-react";
 import type { CertInfo, HttpResponse } from "../lib/types";
 import { formatBytes, formatMs, methodColor, statusColor } from "../lib/format";
 import { geoLookup } from "../lib/api";
@@ -50,6 +50,33 @@ const PHASE_TIPS = {
   wait: "Time To First Byte — from sending the request to the first response byte. Reflects server processing + round-trip.",
   download: "Download — time spent transferring the response body after the first byte arrived.",
 };
+
+// Known corporate TLS-interception proxies / MITM tools. If the presented cert
+// chain is issued by one of these, the TLS detail, cipher, and HTTP version
+// reflect the PROXY, not the origin server — worth telling the user.
+const INTERCEPTORS: { pattern: RegExp; name: string }[] = [
+  { pattern: /zscaler/i, name: "Zscaler" },
+  { pattern: /menlo/i, name: "Menlo Security" },
+  { pattern: /netskope/i, name: "Netskope" },
+  { pattern: /forcepoint/i, name: "Forcepoint" },
+  { pattern: /blue\s?coat|symantec web/i, name: "Blue Coat / Symantec" },
+  { pattern: /fortinet|fortigate/i, name: "Fortinet" },
+  { pattern: /palo\s?alto/i, name: "Palo Alto" },
+  { pattern: /cisco umbrella|cisco.*(proxy|web security)/i, name: "Cisco" },
+  { pattern: /mcafee web|skyhigh/i, name: "McAfee / Skyhigh" },
+  { pattern: /sophos/i, name: "Sophos" },
+  { pattern: /barracuda/i, name: "Barracuda" },
+  { pattern: /check\s?point/i, name: "Check Point" },
+  { pattern: /mitmproxy|charles|fiddler/i, name: "a local debugging proxy" },
+];
+
+function detectInterceptor(certs: CertInfo[]): string | null {
+  for (const c of certs) {
+    const hay = `${c.issuer} ${c.subject}`;
+    for (const i of INTERCEPTORS) if (i.pattern.test(hay)) return i.name;
+  }
+  return null;
+}
 
 export function NetworkPanel({ res }: { res: HttpResponse }) {
   const t = res.timings;
@@ -220,6 +247,20 @@ export function NetworkPanel({ res }: { res: HttpResponse }) {
             </span>
           }
         >
+          {(() => {
+            const vendor = detectInterceptor(n.tls.certificates);
+            return vendor ? (
+              <div className="mb-2 flex gap-2 rounded-lg border border-amber-300/50 bg-amber-50 px-3 py-2 text-[11px] text-amber-700 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-300/90">
+                <ShieldAlert size={14} className="mt-px shrink-0 text-amber-500" />
+                <span>
+                  <span className="font-semibold">TLS intercepted by {vendor}.</span> The
+                  certificate, cipher, and HTTP version below reflect the proxy that terminated
+                  your connection — <em>not</em> the origin server. (This is why HTTP/2 may show as
+                  HTTP/1.1 and timings include the proxy.)
+                </span>
+              </div>
+            ) : null;
+          })()}
           {n.tls.version && <Row label="Version" value={n.tls.version} />}
           {n.tls.cipherSuite && (
             <Row

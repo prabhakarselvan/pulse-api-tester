@@ -311,12 +311,14 @@ pub struct HttpResponse {
     /// Reconstructed raw HTTP response head (status line + headers).
     #[serde(default)]
     pub raw_response_head: String,
-    /// Base64 of the encrypted bytes we WROTE to the socket (TLS records:
-    /// handshake + encrypted request). Capped; empty for non-TLS or reused conns.
+    /// Base64 of the encrypted bytes we WROTE to the socket AFTER the handshake —
+    /// the application-data TLS records (the request under the negotiated cipher).
+    /// Handshake records are cleared. Capped; empty for non-TLS or reused conns.
     #[serde(default)]
     pub tls_tx_b64: String,
-    /// Base64 of the encrypted bytes we READ from the socket (TLS records:
-    /// handshake + encrypted response). Capped; empty for non-TLS or reused conns.
+    /// Base64 of the encrypted bytes we READ from the socket after the handshake —
+    /// the application-data TLS records (the response under the negotiated cipher).
+    /// Handshake records are cleared. Capped; empty for non-TLS or reused conns.
     #[serde(default)]
     pub tls_rx_b64: String,
     /// Total bytes written to the socket (may exceed the captured sample).

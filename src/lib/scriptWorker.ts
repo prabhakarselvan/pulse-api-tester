@@ -73,7 +73,14 @@ self.onmessage = function (e) {
       match: function (re) { chk(re.test(actual), 'expected ' + j(actual) + ' to match ' + re); return api; },
       above: function (n) { chk(actual > n, 'expected ' + j(actual) + ' to be above ' + n); return api; },
       below: function (n) { chk(actual < n, 'expected ' + j(actual) + ' to be below ' + n); return api; },
-      a: function (t) { chk(typeof actual === t, 'expected ' + j(actual) + ' to be a ' + t); return api; },
+      a: function (t) {
+        // chai-style type check: 'array' and 'null' aren't typeof results, so
+        // special-case them (typeof [] === 'object', typeof null === 'object').
+        var got = actual === null ? 'null' : Array.isArray(actual) ? 'array' : typeof actual;
+        var article = /^[aeiou]/i.test(String(t)) ? 'an' : 'a';
+        chk(got === t, 'expected ' + j(actual) + ' to be ' + article + ' ' + t);
+        return api;
+      },
       property: function (k) { chk((typeof actual === 'object' || typeof actual === 'function') && actual != null && (k in actual), 'expected object to have property ' + k); return api; },
       ok: function () { chk(!!actual, 'expected ' + j(actual) + ' to be ok'); return api; },
       'true': function () { chk(actual === true, 'expected ' + j(actual) + ' to be true'); return api; },

@@ -131,13 +131,33 @@ export function toCurl(req: HttpRequest): string {
   return lines.join(" \\\n");
 }
 
+// Headers the browser forbids scripts from setting — the fetch() call silently
+// drops them, so including them in generated code is misleading.
+const FETCH_FORBIDDEN = new Set([
+  "cookie", "host", "origin", "referer", "user-agent", "connection",
+  "content-length", "accept-encoding", "accept-charset", "date", "dnt",
+  "keep-alive", "te", "trailer", "transfer-encoding", "upgrade", "via",
+]);
+
 export function toFetch(req: HttpRequest): string {
-  const headers = Object.fromEntries(effectiveHeaders(req).map((h) => [h.key, h.value]));
+  const all = effectiveHeaders(req);
+  const hadCookie = all.some((h) => h.key.toLowerCase() === "cookie");
+  const headers = Object.fromEntries(
+    all
+      .filter((h) => !FETCH_FORBIDDEN.has(h.key.toLowerCase()))
+      .map((h) => [h.key, h.value]),
+  );
   const opts: Record<string, unknown> = { method: req.method };
   if (Object.keys(headers).length) opts.headers = headers;
   const body = ["multipart", "binary"].includes(req.body.mode) ? null : bodyText(req);
   if (body) opts.body = body;
-  return `const res = await fetch(${JSON.stringify(fullUrl(req))}, ${JSON.stringify(
+  // If the original relied on a Cookie header, the browser sends cookies via the
+  // credentials flag instead (the Cookie header is forbidden for scripts).
+  if (hadCookie) opts.credentials = "include";
+  const note = hadCookie
+    ? "// Note: the browser sets the Cookie header itself (credentials: 'include'); it can't be set here.\n"
+    : "";
+  return `${note}const res = await fetch(${JSON.stringify(fullUrl(req))}, ${JSON.stringify(
     opts,
     null,
     2,
