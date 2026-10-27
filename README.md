@@ -1,92 +1,85 @@
-# Pulse — a fast, native API tester for macOS
+<div align="center">
 
-Pulse is a Postman-style API client built in **Rust + Tauri 2 + React**, with one thing
-Postman hides: **deep network introspection**. Every request shows a full timing waterfall
-(DNS → TCP → TLS → TTFB → download), the DNS resolver + resolved IPs, the TLS version/cipher
-and full certificate chain, the negotiated HTTP version, and the redirect chain — each with an
-inline "?" that explains the concept.
+# ⚡ Pulse
+
+**A fast, native API tester that shows you the whole network path — not just the response.**
+
+[![Release](https://img.shields.io/github/v/release/prabhakarselvan/pulse-api-tester?include_prereleases&sort=semver)](https://github.com/prabhakarselvan/pulse-api-tester/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux-informational)
+![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202%20%2B%20Rust-24C8DB)
+
+<img src="docs/screenshot.png" alt="Pulse — the request builder, network introspection, and response panes" width="920">
+
+</div>
+
+## Why Pulse?
+
+Most API clients show you the response and call it a day. Pulse is built around a
+**custom, instrumented HTTP stack in Rust** that measures and exposes every phase of
+a request — so you can see *why* something is slow or broken, not just *that* it is.
+
+- **Per‑phase timing** — DNS → TCP → TLS → time‑to‑first‑byte → download, as a waterfall.
+- **DNS detail** — which resolver answered, every resolved address, TTL, lookup time.
+- **TLS introspection** — negotiated version & cipher, ALPN, and the full certificate chain (subject, issuer, validity, SAN, fingerprint).
+- **The bytes on the wire** — the raw request/response, the **encrypted ciphertext** under the negotiated cipher, and the decrypted **HTTP/2 frames**.
+- **Every hop** — the full redirect chain with per‑hop status and timing.
+
+It's fast (Rust + a native webview, not Electron), small (~9 MB), and works offline.
 
 ## Features
 
-- **Tabbed workspace** — open many requests at once in tabs; each tab keeps its own request,
-  response, and test results. Switch, add (＋), and close tabs; open tabs are restored on restart.
-- **Request builder** — all methods, query params, headers, and body types (JSON, text,
-  form-urlencoded, multipart, binary, GraphQL), with Bearer / Basic / API-Key auth.
-- **Response viewer** — syntax-highlighted Pretty / Raw / Preview (renders HTML & images),
-  headers, and parsed cookies.
-- **Network panel (the hero)** — per-phase timing waterfall, DNS resolver detail (nameservers,
-  all IPs, TTL), TLS version + cipher + ALPN + full certificate chain (subject, issuer,
-  validity, SANs, SHA-256 fingerprint), HTTP version, sizes, and redirect chain.
-- **Collections & history** — saved requests and request history persisted locally in SQLite.
-- **Collections (folders) + Postman import** — organize requests into nested-folder collections;
-  **import your Postman collections** (v2.0 / v2.1) via a native file picker (multi-select) or by
-  pasting JSON. Folders, requests, all body modes, auth, and URL query params are mapped, and
-  Postman collection/environment variables become Pulse environments (`{{var}}` works as-is).
-- **Security report card** — each response is graded (A–F) on TLS version/cipher, certificate
-  expiry, security headers (HSTS, CSP, X-Content-Type-Options, clickjacking, …) and cookie flags,
-  each with a plain-English explanation.
-- **Flow visualizer** — an animated view of the request's journey (You → DNS → TCP → TLS →
-  request → **server wait** → download): a travelling-packet wire plus per-phase data beams, with
-  waits emphasized and a plain-English note on where the time went. Replayable.
-- **Latency profiler** — fire the request ×N and see the distribution (p50 / p95 / min / max),
-  a per-run sparkline, and the average per-phase breakdown.
-- **Import cURL & "Copy as" code** — paste a cURL command to build a request; export the current
-  request as cURL, JavaScript `fetch`, Python `requests`, or Rust `reqwest`.
-- **Environments & `{{variables}}`** — define reusable variables in named environments and
-  reference them as `{{var}}` in URL/headers/body/auth; switch the active environment from the
-  toolbar. Substitution happens at send time (history keeps the template, not resolved secrets).
-- **Beginner-friendly** — sample requests, educational tooltips, ⌘↵ to send, light/dark theme.
+| | |
+|---|---|
+| **Protocols** | HTTP/1.1 & HTTP/2, WebSocket, Server‑Sent Events, SOAP 1.1/1.2 |
+| **Introspection** | Timing waterfall, DNS, TLS/cert chain, HTTP/2 frame inspector, raw + encrypted wire view, redirect hops |
+| **Requests** | All methods, query/headers, JSON · text · form · multipart (incl. file) · binary · GraphQL · SOAP bodies |
+| **Auth** | Bearer, Basic, API key (header or query), mutual TLS (client certs), HTTP proxy |
+| **Scripting** | Pre‑request & post‑response scripts (Postman‑style `pm` API, chai‑like `expect`, `CryptoJS`), run in a sandboxed worker |
+| **Workflow** | Collections, environments & `{{variables}}`, dynamic vars (`{{$randomUUID}}`…), a collection runner with value chaining |
+| **Import** | Postman v2 collections, OpenAPI 3 / Swagger 2 (JSON or YAML), WSDL, cURL commands |
+| **Analysis** | A/B response diff, a TLS/security report card, an endpoint uptime + cert‑expiry monitor, a latency load‑tester |
+| **Export** | Generate cURL, `fetch`, or Python from any request |
+| **Nice‑to‑haves** | Tabs, keep‑alive connection reuse, light/dark themes, a JSON tree/table viewer |
 
-Networking is a hand-rolled instrumented client (`hyper` + `rustls` + `hickory-resolver`) so
-every phase is measured on the *real* request — not a separate probe.
+## Download
 
-## Prerequisites
+Grab the installer for your platform from the **[latest release](https://github.com/prabhakarselvan/pulse-api-tester/releases/latest)**:
 
-- Rust (stable) — `rustc`/`cargo` on `PATH`
-- Node.js 18+ and npm
-- Xcode Command Line Tools
+| Platform | File |
+|---|---|
+| **macOS** (Apple Silicon / Intel) | `.dmg` |
+| **Windows** | `.msi` or `-setup.exe` |
+| **Linux** | `.AppImage`, `.deb`, or `.rpm` |
 
-## Develop & run
+> **First‑launch note:** these builds are not yet code‑signed, so your OS will warn you the first time.
+> - **macOS:** right‑click the app → **Open** (or run `xattr -cr /Applications/Pulse.app`).
+> - **Windows:** on the SmartScreen prompt, click **More info → Run anyway**.
+> - **Linux (AppImage):** `chmod +x Pulse_*.AppImage` then run it.
+
+## Build from source
+
+Requires [Node.js 18+](https://nodejs.org) and [Rust (stable)](https://rustup.rs). Then:
 
 ```bash
 npm install
-npm run tauri dev      # launches the app (Vite dev server + Rust backend)
+npm run tauri dev     # run with hot reload
+npm run tauri build   # produce a release bundle for your OS
 ```
 
-## Build a distributable
+See [BUILD.md](BUILD.md) for per‑platform prerequisites (MSVC on Windows, WebKitGTK on Linux) and CI details.
 
-```bash
-npm run tauri build    # produces a .app and .dmg under src-tauri/target/release/bundle
-```
+## Tech stack
 
-## Project layout
+**Frontend** React 19 · TypeScript · Tailwind CSS v4 · Vite · Zustand · CodeMirror
+**Backend** Rust · Tauri 2 · hyper · rustls (ring) · hickory‑resolver · tokio · rusqlite
 
-```
-src/                     React frontend (TypeScript + Tailwind)
-  components/            RequestPanel, ResponsePanel, NetworkPanel, Sidebar, …
-  lib/                   types, invoke wrappers, formatting, samples
-  store.ts               Zustand state
-src-tauri/src/
-  model.rs               Shared serde contract (mirrors src/lib/types.ts)
-  net/                   Instrumented client: dns.rs, tls.rs, client.rs
-  store.rs               SQLite persistence
-  commands.rs            Tauri commands (the invoke surface)
-examples/probe.rs        Headless end-to-end probe of the networking core
-```
+## Security
 
-## Note on corporate proxies (Zscaler, etc.)
+Pulse runs user‑authored scripts and stores request data locally. Please read
+**[SECURITY.md](SECURITY.md)** for the security model, known limitations, and how to
+report a vulnerability.
 
-This project was built behind a Zscaler proxy that blocks a few specific crate downloads on
-crates.io (e.g. `untrusted`). Two accommodations are baked in:
+## License
 
-- **`[patch.crates-io]`** in `src-tauri/Cargo.toml` sources the `untrusted` crate from its
-  official git repo (github.com is reachable) instead of the blocked CDN path.
-- When fetching, disable HTTP multiplexing and retry, which gets past intermittent proxy blocks:
-
-  ```bash
-  CARGO_HTTP_MULTIPLEXING=false CARGO_NET_RETRY=10 cargo fetch --manifest-path src-tauri/Cargo.toml
-  ```
-
-Pulse trusts your system/corporate root CAs automatically (via `rustls-native-certs`), so it
-works transparently through a TLS-inspecting proxy — the certificate panel will show the
-proxy's intercepting certificate when one is present.
+[MIT](LICENSE) © 2026 Prabhakar Selvan
