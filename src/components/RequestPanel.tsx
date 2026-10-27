@@ -101,6 +101,16 @@ export function RequestPanel() {
             ↩ {collectionSource.collectionName}
           </span>
         )}
+        {/* Secondary actions live here (not on the URL row) so the URL field can
+            use the full width — it's the most-used control. */}
+        <div className="flex shrink-0 items-center gap-1">
+          <Button variant="subtle" onClick={newRequest} title="New request">
+            <FilePlus size={15} />
+          </Button>
+          <SaveControl />
+          <ImportCurlControl />
+          <CopyAsControl />
+        </div>
       </div>
 
       {/* Protocol mode */}
@@ -178,12 +188,6 @@ export function RequestPanel() {
             )}
           </Button>
         )}
-        <Button variant="subtle" onClick={newRequest} title="New request">
-          <FilePlus size={15} />
-        </Button>
-        <SaveControl />
-        <ImportCurlControl />
-        <CopyAsControl />
       </div>
 
       {/* Builder tabs + request options */}
