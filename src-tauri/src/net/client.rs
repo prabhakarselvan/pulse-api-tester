@@ -1043,17 +1043,20 @@ fn build_url(req: &HttpRequest) -> anyhow::Result<Url> {
         format!("https://{raw}")
     };
     let mut url = Url::parse(&with_scheme).with_context(|| format!("invalid URL: {raw}"))?;
-    {
+    let has_params = req.query_params.iter().any(|p| p.enabled && !p.key.is_empty());
+    let has_apikey_query = req.auth.kind == "apikey"
+        && req.auth.api_key_in == "query"
+        && !req.auth.api_key_name.is_empty();
+    // Only touch the query string when we actually have something to append —
+    // entering `query_pairs_mut()` with zero pairs leaves a spurious empty `?`.
+    if has_params || has_apikey_query {
         let mut qp = url.query_pairs_mut();
         for p in &req.query_params {
             if p.enabled && !p.key.is_empty() {
                 qp.append_pair(&p.key, &p.value);
             }
         }
-        if req.auth.kind == "apikey"
-            && req.auth.api_key_in == "query"
-            && !req.auth.api_key_name.is_empty()
-        {
+        if has_apikey_query {
             qp.append_pair(&req.auth.api_key_name, &req.auth.api_key_value);
         }
     }
@@ -1398,6 +1401,9 @@ mod tests {
         let url = build_url(&req).unwrap();
         assert_eq!(url.scheme(), "https");
         assert_eq!(url.host_str(), Some("example.com"));
+        // No query params → no spurious trailing `?` in the request target.
+        assert_eq!(url.query(), None);
+        assert_eq!(url.as_str(), "https://example.com/path");
 
         req.url = "http://example.com".into();
         assert_eq!(build_url(&req).unwrap().scheme(), "http");

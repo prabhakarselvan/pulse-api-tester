@@ -139,16 +139,54 @@ export function beautifyJson(raw: string): { text: string; ok: boolean } {
     /* fall through to variable-aware attempt */
   }
 
-  // Mask {{var}} tokens with placeholder strings so bare-value variables parse.
-  const vars: string[] = [];
-  const masked = raw.replace(/\{\{[^{}]*\}\}/g, (m) => {
-    const token = `"__PULSE_VAR_${vars.length}__"`;
-    vars.push(m);
-    return token;
-  });
+  // Mask {{var}} tokens so bare-value variables parse. A token already INSIDE a
+  // string must be masked WITHOUT quotes (bareword), while a bare-value token gets
+  // quoted (so it's a valid JSON string). Masking everything as a quoted string —
+  // the old behavior — produced `""__PULSE_VAR__""` for `"{{x}}"`, which is invalid
+  // JSON, so Beautify silently no-op'd on mixed bodies like {"id":{{n}},"s":"{{v}}"}.
+  const vars: { token: string; bare: boolean }[] = [];
+  let masked = "";
+  let inStr = false;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (inStr) {
+      if (ch === "\\") {
+        masked += ch + (raw[i + 1] ?? "");
+        i++;
+        continue;
+      }
+      if (ch === '"') {
+        inStr = false;
+        masked += ch;
+        continue;
+      }
+    } else if (ch === '"') {
+      inStr = true;
+      masked += ch;
+      continue;
+    }
+    if (ch === "{" && raw[i + 1] === "{") {
+      const end = raw.indexOf("}}", i + 2);
+      if (end !== -1) {
+        const token = raw.slice(i, end + 2);
+        const n = vars.length;
+        vars.push({ token, bare: !inStr });
+        masked += inStr ? `__PULSE_VAR_${n}__` : `"__PULSE_VAR_${n}__"`;
+        i = end + 1;
+        continue;
+      }
+    }
+    masked += ch;
+  }
   try {
     let pretty = JSON.stringify(JSON.parse(masked), null, 2);
-    pretty = pretty.replace(/"__PULSE_VAR_(\d+)__"/g, (_m, i) => vars[Number(i)] ?? "");
+    // Unmask: bare tokens are a full JSON string "__PULSE_VAR_n__" (strip the
+    // quotes); in-string tokens are a bareword inside their string (keep quotes).
+    for (let n = vars.length - 1; n >= 0; n--) {
+      const { token, bare } = vars[n];
+      const placeholder = bare ? `"__PULSE_VAR_${n}__"` : `__PULSE_VAR_${n}__`;
+      pretty = pretty.split(placeholder).join(token);
+    }
     return { text: pretty, ok: true };
   } catch {
     return { text: raw, ok: false };
