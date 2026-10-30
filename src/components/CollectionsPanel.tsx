@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -47,6 +47,8 @@ export function CollectionsPanel() {
   const upsertCollection = useStore((s) => s.upsertCollection);
   const query = useStore((s) => s.sidebarQuery).trim().toLowerCase();
   const [importOpen, setImportOpen] = useState(false);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const shown = query
     ? collections
@@ -54,8 +56,24 @@ export function CollectionsPanel() {
         .filter((c) => c.items.length > 0 || c.name.toLowerCase().includes(query))
     : collections;
 
-  const newCollection = () =>
-    upsertCollection({ id: "", name: "New collection", items: [], createdAt: 0, updatedAt: 0 });
+  const newCollection = async () => {
+    setError(null);
+    try {
+      const saved = await upsertCollection({
+        id: "",
+        name: "New collection",
+        items: [],
+        createdAt: 0,
+        updatedAt: 0,
+      });
+      // Drop straight into renaming the new collection: it sorts alphabetically
+      // into a potentially long list, so without this it's easy to think the
+      // button "did nothing." The row scrolls itself into view and focuses.
+      if (saved?.id) setRenamingId(saved.id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
 
   return (
     <div>
@@ -72,6 +90,12 @@ export function CollectionsPanel() {
           </IconButton>
         </div>
       </div>
+
+      {error && (
+        <div className="mx-3 mb-1 rounded bg-rose-500/10 px-2 py-1 text-[11px] text-rose-500">
+          Couldn’t create collection: {error}
+        </div>
+      )}
 
       {collections.length === 0 ? (
         <div className="px-3">
@@ -90,7 +114,16 @@ export function CollectionsPanel() {
           No matches for “{query}”.
         </div>
       ) : (
-        shown.map((c) => <CollectionRow key={c.id} collection={c} forceOpen={!!query} />)
+        shown.map((c) => (
+          <CollectionRow
+            key={c.id}
+            collection={c}
+            forceOpen={!!query}
+            isRenaming={c.id === renamingId}
+            onStartRenaming={() => setRenamingId(c.id)}
+            onStopRenaming={() => setRenamingId(null)}
+          />
+        ))
       )}
 
       {importOpen && <ImportModal onClose={() => setImportOpen(false)} />}
@@ -107,9 +140,15 @@ function countRequests(items: CollectionItem[]): number {
 function CollectionRow({
   collection,
   forceOpen,
+  isRenaming,
+  onStartRenaming,
+  onStopRenaming,
 }: {
   collection: Collection;
   forceOpen?: boolean;
+  isRenaming?: boolean;
+  onStartRenaming?: () => void;
+  onStopRenaming?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const isOpen = forceOpen || open;
@@ -117,6 +156,39 @@ function CollectionRow({
   const removeCollection = useStore((s) => s.removeCollection);
   const addToCollection = useStore((s) => s.addToCollection);
   const runCollection = useStore((s) => s.runCollection);
+  const upsertCollection = useStore((s) => s.upsertCollection);
+  const rowRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [draft, setDraft] = useState(collection.name);
+  const committing = useRef(false);
+
+  // When this row enters rename mode (right after creation, or on double-click),
+  // scroll it into view and focus+select the name field so the collection is
+  // unmistakably present and ready to name.
+  useEffect(() => {
+    if (!isRenaming) return;
+    setDraft(collection.name);
+    rowRef.current?.scrollIntoView({ block: "nearest" });
+    const raf = requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [isRenaming, collection.name]);
+
+  const commitRename = async () => {
+    if (committing.current) return; // Enter + blur can both fire
+    committing.current = true;
+    try {
+      const name = draft.trim();
+      if (name && name !== collection.name) {
+        await upsertCollection({ ...collection, name });
+      }
+      onStopRenaming?.();
+    } finally {
+      committing.current = false;
+    }
+  };
 
   // Guard against a double-click lost update (serialize read-modify-write).
   const add = async () => {
@@ -130,43 +202,66 @@ function CollectionRow({
   };
 
   return (
-    <div className="border-b border-slate-100 dark:border-white/[0.04]">
+    <div ref={rowRef} className="border-b border-slate-100 dark:border-white/[0.04]">
       <div className="group flex items-center">
-        <button
-          onClick={() => setOpen((o) => !o)}
-          className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-2 text-left transition hover:bg-slate-100 dark:hover:bg-white/[0.03]"
-        >
-          {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-          <Folder size={14} className="shrink-0 text-indigo-400" />
-          <span className="truncate text-xs font-semibold text-slate-700 dark:text-slate-200">
-            {collection.name}
-          </span>
-          <span className="ml-1 shrink-0 text-[10px] text-slate-400">
-            {countRequests(collection.items)}
-          </span>
-        </button>
-        <IconButton
-          onClick={() => runCollection(collection.id)}
-          title="Run collection (chained)"
-          className="opacity-0 group-hover:opacity-100"
-        >
-          <Play size={13} />
-        </IconButton>
-        <IconButton
-          onClick={add}
-          disabled={adding}
-          title="Add current request"
-          className="opacity-0 group-hover:opacity-100"
-        >
-          <Plus size={13} />
-        </IconButton>
-        <IconButton
-          onClick={() => removeCollection(collection.id)}
-          title="Delete collection"
-          className="mr-1 opacity-0 group-hover:opacity-100"
-        >
-          <Trash2 size={13} />
-        </IconButton>
+        {isRenaming ? (
+          <div className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-2">
+            <Folder size={14} className="shrink-0 text-indigo-400" />
+            <input
+              ref={inputRef}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") commitRename();
+                else if (e.key === "Escape") onStopRenaming?.();
+              }}
+              onBlur={commitRename}
+              className="min-w-0 flex-1 rounded border border-indigo-400 bg-transparent px-1 py-0.5 text-xs font-semibold text-slate-700 outline-none dark:text-slate-200"
+            />
+          </div>
+        ) : (
+          <button
+            onClick={() => setOpen((o) => !o)}
+            onDoubleClick={onStartRenaming}
+            title="Double-click to rename"
+            className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-2 text-left transition hover:bg-slate-100 dark:hover:bg-white/[0.03]"
+          >
+            {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            <Folder size={14} className="shrink-0 text-indigo-400" />
+            <span className="truncate text-xs font-semibold text-slate-700 dark:text-slate-200">
+              {collection.name}
+            </span>
+            <span className="ml-1 shrink-0 text-[10px] text-slate-400">
+              {countRequests(collection.items)}
+            </span>
+          </button>
+        )}
+        {!isRenaming && (
+          <>
+            <IconButton
+              onClick={() => runCollection(collection.id)}
+              title="Run collection (chained)"
+              className="opacity-0 group-hover:opacity-100"
+            >
+              <Play size={13} />
+            </IconButton>
+            <IconButton
+              onClick={add}
+              disabled={adding}
+              title="Add current request"
+              className="opacity-0 group-hover:opacity-100"
+            >
+              <Plus size={13} />
+            </IconButton>
+            <IconButton
+              onClick={() => removeCollection(collection.id)}
+              title="Delete collection"
+              className="mr-1 opacity-0 group-hover:opacity-100"
+            >
+              <Trash2 size={13} />
+            </IconButton>
+          </>
+        )}
       </div>
       {isOpen && (
         <div className="pb-1">

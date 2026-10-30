@@ -1011,8 +1011,10 @@ export const useStore = create<State>((set, get) => {
   refreshCollections: async () => {
     try {
       set({ collections: await api.listCollections() });
-    } catch {
-      /* ignore */
+    } catch (e) {
+      // Don't crash the UI, but don't hide it either — a stale list used to make
+      // a successful save look like "nothing happened."
+      console.error("listCollections failed:", e);
     }
   },
 
