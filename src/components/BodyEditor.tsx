@@ -3,7 +3,7 @@ import { FileCode2, Loader2, Plus, Trash2, X } from "lucide-react";
 import { useStore } from "../store";
 import type { Body, BodyMode, MultipartField } from "../lib/types";
 import { emptyMultipart } from "../lib/samples";
-import { beautifyJson } from "../lib/format";
+import { beautifyJson, beautifyXml } from "../lib/format";
 import { fetchWsdl } from "../lib/api";
 import { sampleFilePath } from "../lib/platform";
 import {
@@ -72,6 +72,10 @@ export function BodyEditor() {
           ? { text: "Variables formatted", ok: true }
           : { text: "Variables aren't valid JSON", ok: false },
       );
+    } else if (body.mode === "soap") {
+      const r = beautifyXml(body.soapEnvelope);
+      if (r.ok) setBody({ soapEnvelope: r.text });
+      setBeautifyMsg(r.ok ? { text: "Formatted", ok: true } : { text: "Invalid XML", ok: false });
     } else {
       const r = beautifyJson(body.raw);
       if (r.ok) setBody({ raw: r.text });
@@ -88,7 +92,9 @@ export function BodyEditor() {
           value={body.mode}
           onChange={selectMode}
         />
-        {(body.mode === "json" || body.mode === "graphql") && (
+        {(body.mode === "json" ||
+          body.mode === "graphql" ||
+          body.mode === "soap") && (
           <div className="flex items-center gap-2">
             {beautifyMsg && (
               <span

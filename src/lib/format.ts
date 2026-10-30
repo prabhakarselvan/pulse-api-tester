@@ -126,6 +126,108 @@ export function prettyXml(xml: string): string {
 }
 
 /**
+ * Validate and pretty-print XML (SOAP envelopes, XML payloads). Unlike the
+ * best-effort {@link prettyXml}, this parses with the webview's DOMParser so
+ * malformed XML is reported honestly (`ok: false`, original text untouched),
+ * then re-serializes with namespace-, attribute-, CDATA-, and comment-aware
+ * indentation. `{{variables}}` in text/attribute positions are preserved as-is
+ * (they're ordinary XML character data). Mirrors {@link beautifyJson}.
+ */
+export function beautifyXml(raw: string): { text: string; ok: boolean } {
+  const src = raw.trim();
+  if (!src.startsWith("<")) return { text: raw, ok: false };
+  let doc: Document;
+  try {
+    doc = new DOMParser().parseFromString(src, "application/xml");
+  } catch {
+    return { text: raw, ok: false };
+  }
+  // DOMParser signals a failure by inserting a <parsererror> element rather than
+  // throwing — same check parseWsdl() uses.
+  if (doc.getElementsByTagName("parsererror").length || !doc.documentElement) {
+    return { text: raw, ok: false };
+  }
+
+  const PAD = "  ";
+  const escapeText = (s: string) =>
+    s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const escapeAttr = (s: string) =>
+    s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+
+  const lines: string[] = [];
+  // DOMParser drops the XML declaration from the tree — keep the original's.
+  const decl = src.match(/^<\?xml\b[^>]*\?>/i);
+  if (decl) lines.push(decl[0]);
+
+  const openTag = (el: Element): string => {
+    let s = "<" + el.nodeName;
+    for (let i = 0; i < el.attributes.length; i++) {
+      const a = el.attributes[i];
+      s += ` ${a.name}="${escapeAttr(a.value)}"`;
+    }
+    return s;
+  };
+
+  const walk = (node: Node, depth: number) => {
+    const pad = PAD.repeat(depth);
+    switch (node.nodeType) {
+      case Node.ELEMENT_NODE: {
+        const el = node as Element;
+        // Drop whitespace-only text nodes so nesting indents cleanly.
+        const kids = Array.from(el.childNodes).filter(
+          (n) => !(n.nodeType === Node.TEXT_NODE && !(n.nodeValue ?? "").trim()),
+        );
+        if (kids.length === 0) {
+          lines.push(pad + openTag(el) + "/>");
+          return;
+        }
+        // A lone text/CDATA child stays inline: <tag>value</tag>.
+        if (
+          kids.length === 1 &&
+          (kids[0].nodeType === Node.TEXT_NODE ||
+            kids[0].nodeType === Node.CDATA_SECTION_NODE)
+        ) {
+          const only = kids[0];
+          const inner =
+            only.nodeType === Node.CDATA_SECTION_NODE
+              ? `<![CDATA[${only.nodeValue ?? ""}]]>`
+              : escapeText((only.nodeValue ?? "").trim());
+          lines.push(pad + openTag(el) + ">" + inner + "</" + el.nodeName + ">");
+          return;
+        }
+        lines.push(pad + openTag(el) + ">");
+        for (const k of kids) walk(k, depth + 1);
+        lines.push(pad + "</" + el.nodeName + ">");
+        return;
+      }
+      case Node.TEXT_NODE: {
+        const t = (node.nodeValue ?? "").trim();
+        if (t) lines.push(pad + escapeText(t));
+        return;
+      }
+      case Node.CDATA_SECTION_NODE:
+        lines.push(pad + `<![CDATA[${node.nodeValue ?? ""}]]>`);
+        return;
+      case Node.COMMENT_NODE:
+        lines.push(pad + `<!--${node.nodeValue ?? ""}-->`);
+        return;
+      case Node.PROCESSING_INSTRUCTION_NODE: {
+        const pi = node as ProcessingInstruction;
+        lines.push(pad + `<?${pi.target} ${pi.data}?>`);
+        return;
+      }
+    }
+  };
+
+  try {
+    walk(doc.documentElement, 0);
+    return { text: lines.join("\n"), ok: true };
+  } catch {
+    return { text: raw, ok: false };
+  }
+}
+
+/**
  * Pretty-print JSON, tolerating `{{variables}}` used as bare values (common in
  * API testing). Returns `ok: false` when the text can't be parsed as JSON.
  */
